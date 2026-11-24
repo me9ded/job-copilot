@@ -1,0 +1,9 @@
+node_modules/
+.output/
+.output-e2e/
+.wxt/
+test-results/
+playwright-report/
+*.log
+dist/
+dist-e2e/

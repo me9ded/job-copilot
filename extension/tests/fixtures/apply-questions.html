@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply — Frontend Engineer at Northwind Labs</title></head>
+<body>
+  <h1>Apply for Frontend Engineer</h1>
+  <form id="app">
+    <label for="fn">First Name *</label><input id="fn" name="fn" required>
+    <label for="ts">Tell us about your TypeScript experience *</label><textarea id="ts" name="ts" maxlength="600" required></textarea>
+    <label for="why">Why do you want to work here?</label><textarea id="why" name="why"></textarea>
+    <label for="rust">Describe your experience with Rust</label><textarea id="rust" name="rust"></textarea>
+    <button type="submit">Submit application</button>
+  </form>
+  <script>
+    window.submitted = false;
+    document.getElementById('app').addEventListener('submit', (e) => { e.preventDefault(); window.submitted = true; });
+  </script>
+</body>
+</html>

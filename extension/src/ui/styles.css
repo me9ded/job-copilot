@@ -1,0 +1,83 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Soft, low-glare light palette: warm off-white surfaces, charcoal text,
+     muted teal accent. Every text colour keeps at least 4.5:1 contrast. */
+  --color-canvas: #f5f4ef;
+  --color-surface: #fcfbf8;
+  --color-subtle: #efede6;
+  --color-line: #e5e1d8;
+  --color-line-strong: #d2cdc1;
+  --color-fg: #33383d;
+  --color-muted: #666c72;
+  --color-accent: #3b7282;
+  --color-accent-hover: #30606e;
+  --color-accent-soft: #e3eff1;
+  --color-accent-fg: #ffffff;
+  --color-good: #3b7553;
+  --color-good-soft: #e7f2ea;
+  --color-warn: #87601a;
+  --color-warn-soft: #faf0dc;
+  --color-bad: #a8473f;
+  --color-bad-soft: #fbeae7;
+}
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body {
+  background: var(--color-canvas);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* Rendered (sanitized) job descriptions */
+.prose-job h1,
+.prose-job h2,
+.prose-job h3,
+.prose-job h4 {
+  font-weight: 600;
+  margin: 0.9em 0 0.35em;
+}
+.prose-job p {
+  margin: 0.45em 0;
+}
+.prose-job ul,
+.prose-job ol {
+  margin: 0.35em 0 0.6em;
+  padding-left: 1.25em;
+}
+.prose-job ul {
+  list-style: disc;
+}
+.prose-job ol {
+  list-style: decimal;
+}
+.prose-job a {
+  color: var(--color-accent);
+  text-decoration: underline;
+}
+
+dialog::backdrop {
+  background: rgb(51 56 61 / 0.25);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}

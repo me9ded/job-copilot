@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply — Systems Test Intern</title>
+<style>.step[hidden]{display:none} [role=listbox]{border:1px solid #ccc}</style></head>
+<body>
+  <h1>Application: Systems Test Intern</h1>
+  <form id="app">
+    <section class="step" id="s1">
+      <h2>Your details</h2>
+      <label for="fn">First name *</label><input id="fn" name="fn" required>
+      <label for="ln">Last name *</label><input id="ln" name="ln" required>
+      <label for="em">Email *</label><input id="em" name="em" type="email" required>
+      <label for="cv">Upload your resume *</label><input id="cv" name="cv" type="file" accept=".pdf">
+      <button type="button" class="next">Next</button>
+    </section>
+    <section class="step" id="s2" hidden>
+      <h2>Questions</h2>
+      <fieldset><legend>Are you legally authorized to work in Canada? *</legend>
+        <label><input type="radio" name="auth" value="yes" required> Yes</label>
+        <label><input type="radio" name="auth" value="no"> No</label></fieldset>
+      <label for="spons">Will you now or in the future require sponsorship?</label>
+      <select id="spons" name="spons"><option value="">Select…</option><option value="y">Yes</option><option value="n">No</option></select>
+      <span id="hear-l">How did you hear about us?</span>
+      <button type="button" id="hear" aria-haspopup="listbox" aria-labelledby="hear-l">Select one</button>
+      <div id="hear-pop"></div>
+      <label for="gender">Gender</label>
+      <select id="gender" name="gender"><option value="">Select…</option><option>Man</option><option>Woman</option><option>I don't wish to answer</option></select>
+      <button type="button" class="next">Continue</button>
+    </section>
+    <section class="step" id="s3" hidden>
+      <h2>Almost done</h2>
+      <label for="prev">Have you previously worked for Contoso? *</label>
+      <select id="prev" name="prev" required><option value="">Select…</option><option>Yes</option><option>No</option></select>
+      <button type="submit">Submit application</button>
+    </section>
+  </form>
+  <script>
+    window.submitted = null;
+    const steps = [...document.querySelectorAll('.step')];
+    document.querySelectorAll('.next').forEach((b, i) => b.addEventListener('click', () => {
+      // Validates like a real form: required fields of the step must be set.
+      const missing = [...steps[i].querySelectorAll('[required]')].filter((el) => el.type === 'radio' ? !steps[i].querySelector(`[name=${el.name}]:checked`) : !el.value);
+      if (missing.length) return;
+      steps[i].hidden = true; steps[i + 1].hidden = false;
+    }));
+    const hear = document.getElementById('hear');
+    hear.addEventListener('click', () => {
+      const pop = document.getElementById('hear-pop');
+      pop.innerHTML = '<div role="listbox"><div role="option">LinkedIn</div><div role="option">Company website</div><div role="option">A friend</div></div>';
+      pop.querySelectorAll('[role=option]').forEach((o) => o.addEventListener('click', () => { hear.textContent = o.textContent; pop.innerHTML = ''; }));
+    });
+    document.getElementById('app').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      window.submitted = { fn: f.get('fn'), auth: f.get('auth'), spons: f.get('spons'), gender: f.get('gender'), prev: f.get('prev'), hear: hear.textContent, cv: f.get('cv')?.name };
+      document.body.innerHTML = '<h1>Thank you for applying!</h1>';
+    });
+  </script>
+</body>
+</html>

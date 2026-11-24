@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>My Experience — Contoso Careers</title>
+<style>.hidden{display:none}</style></head>
+<body>
+  <!-- A Workday-style step: repeatable work history that starts empty, behind an "Add" button. -->
+  <div id="step1">
+    <h2>My Experience</h2>
+    <section aria-labelledby="work-h">
+      <h3 id="work-h">Work Experience</h3>
+      <div id="entries"></div>
+      <button type="button" id="add-work" aria-label="Add Work Experience">Add</button>
+    </section>
+    <button type="button" id="next">Save and Continue</button>
+  </div>
+  <div id="step2" class="hidden">
+    <h2>Review</h2>
+    <button type="button" id="submit">Submit</button>
+  </div>
+  <template id="entry">
+    <div class="entry">
+      <h4>Work Experience <span class="n"></span></h4>
+      <label data-for="title">Job Title *</label><input data-id="title">
+      <label data-for="company">Company *</label><input data-id="company">
+      <label data-for="location">Location</label><input data-id="location">
+      <input type="checkbox" data-id="current"><label data-for="current">I currently work here</label>
+      <fieldset class="from"><legend>From *</legend>
+        <label data-for="fm">Month</label><input data-id="fm" placeholder="MM" maxlength="2">
+        <label data-for="fy">Year</label><input data-id="fy" placeholder="YYYY" maxlength="4">
+      </fieldset>
+      <fieldset class="to"><legend>To *</legend>
+        <label data-for="tm">Month</label><input data-id="tm" placeholder="MM" maxlength="2">
+        <label data-for="ty">Year</label><input data-id="ty" placeholder="YYYY" maxlength="4">
+      </fieldset>
+      <label data-for="desc">Role Description</label><textarea data-id="desc"></textarea>
+    </div>
+  </template>
+  <script>
+    let count = 0;
+    window.submitted = null;
+    document.getElementById('add-work').addEventListener('click', () => {
+      // Like Workday, the new entry renders a moment after the click.
+      setTimeout(() => {
+        const n = ++count;
+        const node = document.getElementById('entry').content.cloneNode(true);
+        node.querySelector('.n').textContent = n;
+        node.querySelectorAll('[data-id]').forEach((el) => (el.id = `w${n}-${el.dataset.id}`));
+        node.querySelectorAll('[data-for]').forEach((el) => el.setAttribute('for', `w${n}-${el.dataset.for}`));
+        const entry = node.querySelector('.entry');
+        entry.id = `work-${n}`;
+        const cur = node.querySelector('[data-id=current]');
+        const to = node.querySelector('.to');
+        cur.addEventListener('change', () => to.classList.toggle('hidden', cur.checked));
+        document.getElementById('entries').appendChild(node);
+      }, 150);
+    });
+    document.getElementById('next').addEventListener('click', () => {
+      document.getElementById('step1').classList.add('hidden');
+      document.getElementById('step2').classList.remove('hidden');
+    });
+    document.getElementById('submit').addEventListener('click', () => {
+      window.submitted = [...document.querySelectorAll('.entry')].map((e) => Object.fromEntries([...e.querySelectorAll('input, textarea')].map((i) => [i.dataset.id, i.type === 'checkbox' ? i.checked : i.value])));
+    });
+  </script>
+</body>
+</html>
