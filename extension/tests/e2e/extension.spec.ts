@@ -111,6 +111,13 @@ test('side panel reads an uploaded PDF résumé locally and shows what it found'
   await expect(panel.getByRole('heading', { name: 'Career profile' })).toBeVisible();
   await panel.locator('#resume-file').setInputFiles({ name: 'resume.pdf', mimeType: 'application/pdf', buffer: await resumePdf() });
   const card = panel.locator('#pane-profile');
+  // Nothing is saved until the extracted profile is reviewed and confirmed.
+  await expect(card.getByRole('heading', { name: 'Check what was found' })).toBeVisible({ timeout: 15_000 });
+  await expect(card).toContainText('Read from resume.pdf (PDF, 1 page) on this device');
+  await expect(card.getByLabel('Name')).toHaveValue('Sam Rivera');
+  await expect(card).toContainText('Senior Frontend Engineer · Initech');
+  expect(await storage(panel, 'local', 'resumes')).toBeUndefined();
+  await card.getByRole('button', { name: 'Save to profile' }).click();
   await expect(card).toContainText('Read from resume.pdf', { timeout: 15_000 });
   await expect(card).toContainText('Sam Rivera');
   await expect(card).toContainText('sam@example.com');

@@ -154,9 +154,9 @@ describe('harder controls', () => {
       <label for="a">Tell us about your Python experience</label><textarea id="a" maxlength="500"></textarea>
       <label for="b">Preferred office</label><select id="b"><option value="">Choose…</option><option>Toronto</option><option>Ottawa</option></select>`;
     const r = await runApplication(document, req());
-    expect(r.unanswered).toEqual([
-      { label: 'Tell us about your Python experience', required: false, kind: 'textarea', options: undefined, maxLength: 500 },
-      { label: 'Preferred office', required: false, kind: 'select', options: ['Toronto', 'Ottawa'], maxLength: undefined },
+    expect(r.unanswered).toMatchObject([
+      { label: 'Tell us about your Python experience', required: false, kind: 'textarea', options: undefined, maxLength: 500, id: 'textarea:tell us about your python experience#1', reason: 'no_answer' },
+      { label: 'Preferred office', required: false, kind: 'select', options: ['Toronto', 'Ottawa'], maxLength: undefined, category: 'relocation' },
     ]);
   });
 

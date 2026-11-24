@@ -37,13 +37,13 @@
 |---|---|
 | `entrypoints/background.ts` | Service worker: startup migrations, listeners, menus, commands |
 | `entrypoints/job-detector.ts` | Content script (unlisted, IIFE): extraction, SPA URL polling, on-page pill |
-| `entrypoints/form-filler.ts` | Injected only on an Autofill click. Exposes `fill` (step through the form) and `answer` (one question). It also has `submit` (only in a frame whose last fill ended at the submit button), which the UI no longer calls: you press the page's Submit yourself |
+| `entrypoints/form-filler.ts` | Injected only on an Autofill click, into every frame Chrome lets it into. Installs a versioned API (`probe`, `fillStep`, `advance`, `state`, `answer(id)`, `reveal(id)`, `toast`); a filler left in a page by an older build is replaced, not reused. There is no submit method: you press the page's Submit yourself |
 | `entrypoints/{popup,sidepanel,dashboard}` | React roots: `ui/Popup.tsx`, `ui/panel/Panel.tsx` (tabs in `ui/panel/*Tab.tsx`), `ui/App.tsx` |
 | `background/` | Message router, content-script registration, tab analysis, alarms, notifications |
 | `lib/extraction/` | JSON-LD / microdata parsing, site adapters, section splitting, salary parsing, completeness |
 | `lib/matching/` | Skill taxonomy and matchers, job / profile analysis, scoring engine, cached service |
 | `lib/storage/` | Schema, migrations, repository (locks, CRUD, caches, backup / import / delete) |
-| `lib/autofill/` | Field classification and filling (`fill.ts`, runs in the page: open shadow DOM, button groups, follow-up re-scan, date inputs, per-field errors), repeatable work-history / education sections (`history.ts`), per-ATS navigation hints (`sites.ts`), values, résumé choice and injection (`run.ts`), and the answer composer (`answers.ts`, runs in the extension page) |
+| `lib/autofill/` | The autofill engine (`engine/*`, see [Autofill engine](#autofill-engine)), one step of filling with verification (`fill.ts`, runs in the page), the step loop shared by both drivers (`progress.ts`), repeatable work-history / education sections (`history.ts`), per-ATS navigation hints (`sites.ts`), profile values, résumé choice and the tab driver (`run.ts`, runs in the extension page), and the answer composer (`answers.ts`) |
 | `lib/profile/` | Derived views of the profile: skill groups, achievements vs responsibilities, employment type, skill evidence and time spans |
 | `lib/matching/fit.ts` | Plain-language reasons to apply and potential gaps from a match result |
 | `lib/resume/` | PDF / DOCX text extraction, résumé parser, tailoring, diff, cover-letter template, DOCX / PDF export |
@@ -140,6 +140,34 @@ Two phases, so nothing generated reaches a page unreviewed:
 
 The job used for tailoring is `jobContext:<tabId>` (session storage), written whenever a job is analyzed in that tab and kept across navigation, so Apply → form still knows the job; or one the user picks from saved jobs. Optional AI (`aiAnswerQuestion`, feature `applicationAnswers`, off by default) gets the question, the draft and its evidence inside fenced blocks. Its output goes through `checkClaims` / `evidenceSupported`; flagged numbers or skills must be acknowledged before **Use**.
 
+## Autofill engine
+
+Autofill is generic: it works on forms it has no site rules for. Site hints (`sites.ts`) only help it find Next / Apply buttons. Everything runs locally; nothing about the profile or the page leaves the browser.
+
+| Part | File | What it does |
+|---|---|---|
+| Form detector | `engine/detect.ts` | Scores forms and landmark regions on application signals (name / email / phone fields, a résumé upload, apply wording) and penalises search, newsletter, login, cookie, chat, `nav`, `header` and `footer` regions. Filling and button lookup stay inside the chosen scope. A page with only noise counts as "no form", so the form behind **Apply** gets opened |
+| Field discovery | `engine/discover.ts` | Native inputs, selects, textareas, ARIA radios / checkboxes / switches, comboboxes and listbox buttons, contenteditable editors, Yes / No button groups and file inputs, including inside open shadow roots. Skips hidden, disabled, read-only, honeypot, search and password fields. Each question gets weighted label evidence (its own label beats name / id / nearby text), a section (the heading it sits under), a required flag and a per-page id, so two questions with the same wording stay apart |
+| Classification | `engine/classify.ts` | Profile fields, saved screening answers, skills and languages, files, consent; signatures / initials and identity numbers are never filled; reference and emergency-contact sections never get your details. Questions are grouped into categories (eligibility, sponsorship, pay, availability, relocation, employment type, demographics, …) for the panel |
+| Matching | `engine/match.ts` | Ordered candidate values per field (phone formats, province / state and country names and codes derived from your location, degree levels, dates formatted for the field). Options are matched strictly: exact text, curated synonyms, then whole words. There's no substring matching ("Java" never picks "JavaScript", "Male" never picks "Female"), and when two options tie, you're asked |
+| Interaction | `engine/interact.ts`, `engine/controls.ts` | Focus / native setter / composed `InputEvent` / `change` / blur, falling back to typing one character at a time for masked fields. Custom dropdowns are opened and only the options that belong to *that* control are used (`aria-controls` / `aria-owns`, or options that appeared after opening), with a keyboard fallback |
+| Dynamic forms | `engine/observe.ts` | MutationObserver-based waits instead of fixed sleeps. After answers that can reveal follow-up questions the step is re-scanned (up to 6 passes) |
+| Verification | `engine/verify.ts` | Every value is read back after filling and again once the page settles. `filled` holds only verified fields; refused values go to `failed` (with the reason and the page's options), reverted ones to `unverified` |
+| Steps | `engine/steps.ts`, `progress.ts` | Next / Apply / Submit buttons (including ones that name the next step, like “Next: Experience”; a button that mentions submitting, signing in or leaving the form is never pressed as Next), CAPTCHA and sign-in detection, validation errors. The readiness check (empty required fields, invalid fields, visible errors) decides whether a step is ready to submit |
+| Report | `engine/report.ts` | `filled`, `unanswered` (id, frame, category, section, reason), `failed`, `unverified`, `skipped`, `resume` (attached / already / rejected / not accepted / not found / off), inaccessible `frames`, `needsAccess`, `newTab`, `moreSteps` |
+| On-page marks | `engine/mark.ts` | Green outline for verified fields, red dashed for failed ones, amber for required questions still unanswered |
+
+**Tab driver (`run.ts`).** The step loop runs in the extension page, not in the form, so a page that reloads on **Next** can't lose the report:
+
+1. inject the filler (version-checked) into every accessible frame;
+2. probe the frames and fill the ones holding a form;
+3. press Next / Apply;
+4. poll the tab and frame state (URL, load status, `documentId`, step signature) and new tabs opened from it, until it moves, navigates, opens a new tab, is refused (validation messages), or access is lost.
+
+Cross-origin frames Chrome doesn't let it into are reported (with an **Allow access** button that requests the optional host permission) and never bypassed. When **Apply** opens a new tab, autofill continues there if it can reach it. A `window.open` hook is installed in the page only for the duration of Job Copilot's own Apply press, so a blocked popup can be followed in the same tab.
+
+**Résumé attachment.** The file is assigned with `DataTransfer` and only reported as attached once the input holds it and the page shows no upload error. A field that already has a file is kept unless the overwrite setting allows replacing it.
+
 ## Repeatable sections (`lib/autofill/history.ts`)
 
-Experience / education entries are found by an anchor field (job title / school) whose container holds at least three recognised fields. Each profile entry is filled into the next container; when there are none left, the section's **Add** button (by its own label or its nearest heading) is pressed and the new entry awaited. Date fields are told apart by the nearest "From / To / Start / End" text, and split month / year inputs get `MM` / `YYYY` (month names for selects). The current role ticks "I currently work here" instead of an end date. Filled controls are claimed so the generic pass doesn't touch them again.
+Experience / education entries are found by an anchor field (job title / school) whose container (never the whole page) holds at least three recognised fields. Each profile entry is filled into the next container; when there are none left, the section's **Add** button (by its own label or its nearest heading) is pressed and the new entry awaited. Date fields are told apart by the nearest "From / To / Start / End" text, and split month / year inputs get `MM` / `YYYY` (month names for selects). The current role ticks "I currently work here" instead of an end date. Only the entry's own fields are claimed, so the generic pass fills the rest; a value an entry field doesn't accept is reported as not filled.

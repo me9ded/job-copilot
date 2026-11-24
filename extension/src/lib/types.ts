@@ -86,7 +86,10 @@ export const Experience = z.object({
   end: z.string().default(''),
   /** Empty when unknown. Guessed from the title on import; the user can change it. */
   employmentType: z.enum(['', 'full-time', 'part-time', 'internship', 'co-op', 'contract', 'volunteer']).default(''),
+  /** Responsibilities and achievements, in the résumé's own words. */
   bullets: z.array(z.string()).default([]),
+  /** Technologies and tools named for this role ("Tech: …" lines and skills its bullets mention). */
+  skills: z.array(z.string()).optional(),
 });
 export type Experience = z.infer<typeof Experience>;
 
@@ -98,6 +101,8 @@ export const Education = z.object({
   start: z.string().default(''),
   end: z.string().default(''),
   details: z.array(z.string()).default([]),
+  /** "Relevant coursework" listed for this program. */
+  coursework: z.array(z.string()).optional(),
 });
 export type Education = z.infer<typeof Education>;
 
@@ -134,6 +139,12 @@ export const ResumeContent = z.object({
   education: z.array(Education).default([]),
   projects: z.array(Project).default([]),
   certifications: z.array(z.string()).default([]),
+  /** Spoken languages as written ("French (professional)"). */
+  languages: z.array(z.string()).optional(),
+  /** Awards, honours and scholarships as written. */
+  awards: z.array(z.string()).optional(),
+  /** Other sections kept verbatim (publications, leadership, activities, interests). */
+  extras: z.array(z.object({ heading: z.string().max(80), items: z.array(z.string()) })).optional(),
 });
 export type ResumeContent = z.infer<typeof ResumeContent>;
 
@@ -156,6 +167,12 @@ export const Profile = ResumeContent.extend({
   version: z.number().int().nonnegative().default(0),
   updatedAt: z.string().default(''),
   preferences: Preferences.default(Preferences.parse({})),
+  /**
+   * Where each piece of the profile came from: keys like "basics.email", "experience:<id>"
+   * or "skills:<name>" map to the ids of the uploaded résumés it was read from.
+   * Missing means typed by hand (or imported before sources were tracked).
+   */
+  provenance: z.record(z.string(), z.array(z.string())).optional(),
 });
 export type Profile = z.infer<typeof Profile>;
 
@@ -168,6 +185,11 @@ export const ResumeVersion = z.object({
   /** Original extracted text for uploaded files; preserved verbatim. */
   rawText: z.string().optional(),
   sourceFileName: z.string().optional(),
+  /** Uploads that are versions of the same résumé share a family id (the first upload's id). */
+  family: z.string().optional(),
+  /** File format of an uploaded original and, for PDFs, the pages read. */
+  fileKind: z.enum(['pdf', 'docx', 'text']).optional(),
+  pages: z.number().int().nonnegative().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -353,7 +375,7 @@ export const StoredFile = z.object({
 });
 export type StoredFile = z.infer<typeof StoredFile>;
 
-export const AUTOFILL_KEYS = ['firstName', 'lastName', 'fullName', 'email', 'phone', 'location', 'city', 'linkedin', 'github', 'website', 'currentTitle', 'currentCompany', 'school', 'degree', 'discipline'] as const;
+export const AUTOFILL_KEYS = ['firstName', 'lastName', 'fullName', 'email', 'phone', 'location', 'address', 'city', 'state', 'postalCode', 'country', 'linkedin', 'github', 'website', 'currentTitle', 'currentCompany', 'school', 'degree', 'discipline'] as const;
 export type AutofillKey = (typeof AUTOFILL_KEYS)[number];
 
 /** Screening questions answered only from what the user typed in Settings → Applications. */

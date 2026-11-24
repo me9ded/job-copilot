@@ -5,6 +5,10 @@ import tailwindcss from '@tailwindcss/vite';
 // content script against a local fixture server without a permission prompt.
 const isE2E = process.env.E2E === '1';
 
+// One id for the whole build. WXT runs a separate Vite build per entrypoint group (the
+// injected filler is built apart from the side panel), so it must not be computed per build.
+const BUILD_ID = Date.now().toString(36);
+
 export default defineConfig({
   srcDir: 'src',
   outDir: isE2E ? 'dist-e2e' : 'dist',
@@ -12,6 +16,8 @@ export default defineConfig({
   imports: false,
   vite: () => ({
     plugins: [tailwindcss()],
+    // Lets the extension tell a filler injected by this build from one left in a page by an earlier build.
+    define: { __JC_BUILD__: JSON.stringify(BUILD_ID) },
     build: { chunkSizeWarningLimit: 1500 },
   }),
   manifest: {

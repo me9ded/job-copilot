@@ -1,14 +1,22 @@
-import { strFromU8, unzipSync } from 'fflate';
 import { normalizeWhitespace } from '../util';
+import { extractDocxText } from './docx';
+import { ResumeFileError } from './errors';
+import { MAX_PDF_PAGES, readPdf, SCANNED_PDF } from './pdf';
 
-/** Résumé files are parsed locally in the extension page. Nothing is uploaded. */
+export { extractDocxText } from './docx';
+export { ResumeFileError } from './errors';
+export { extractPdfText, readPdf } from './pdf';
 
-export class ResumeFileError extends Error {
-  override name = 'ResumeFileError';
-}
+/**
+ * Résumé upload manager: checks the file, picks the extractor for its real
+ * format (by content, not by name) and judges whether enough readable text
+ * came out. Everything runs in the extension page; nothing is uploaded.
+ */
 
 export const MAX_RESUME_BYTES = 10 * 1024 * 1024;
-const MAX_PDF_PAGES = 15;
+
+/** The `accept` list for résumé file pickers. */
+export const RESUME_ACCEPT = '.pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown';
 
 const startsWith = (data: Uint8Array, bytes: number[]) => bytes.every((b, i) => data[i] === b);
 
@@ -16,173 +24,19 @@ export type ResumeFileKind = 'pdf' | 'docx' | 'text';
 
 export function detectKind(name: string, data: Uint8Array): ResumeFileKind {
   if (startsWith(data, [0x25, 0x50, 0x44, 0x46, 0x2d])) return 'pdf'; // %PDF-
-  if (startsWith(data, [0x50, 0x4b, 0x03, 0x04])) return 'docx'; // PK zip
+  if (startsWith(data, [0x50, 0x4b, 0x03, 0x04])) {
+    if (/\.(odt|pages)$/i.test(name)) throw new ResumeFileError('OpenDocument (.odt) and Pages files are not supported. Export the résumé as .docx or PDF and try again.');
+    return 'docx'; // PK zip
+  }
   if (startsWith(data, [0xd0, 0xcf, 0x11, 0xe0]))
     throw new ResumeFileError('Legacy .doc files (and password-protected .docx files) are not supported. Save the résumé as .docx or PDF and try again.');
-  if (/\.(txt|md)$/i.test(name)) return 'text';
+  if (startsWith(data, [0x89, 0x50, 0x4e, 0x47]) || startsWith(data, [0xff, 0xd8, 0xff]) || /\.(png|jpe?g|heic|webp|tiff?)$/i.test(name))
+    throw new ResumeFileError('This is an image. Job Copilot reads the text of PDF, DOCX or TXT résumés; a photo or scan would need text recognition (OCR) first.');
+  if (startsWith(data, [0x7b, 0x5c, 0x72, 0x74, 0x66])) throw new ResumeFileError('RTF files are not supported. Save the résumé as .docx or PDF and try again.');
+  if (/\.(txt|md|text)$/i.test(name)) return 'text';
   if (/\.pdf$/i.test(name)) throw new ResumeFileError('This file has a .pdf name but is not a valid PDF.');
   if (/\.docx$/i.test(name)) throw new ResumeFileError('This file has a .docx name but is not a valid Word document.');
   throw new ResumeFileError('Unsupported file type. Upload a PDF, DOCX or plain-text résumé.');
-}
-
-/* ----------------------------------------------------------------------------
- * DOCX: unzip and read word/document.xml (paragraphs, tabs, breaks, list items)
- * ------------------------------------------------------------------------- */
-
-export function extractDocxText(data: Uint8Array): string {
-  let files: Record<string, Uint8Array>;
-  try {
-    files = unzipSync(data, { filter: (f) => f.name === 'word/document.xml' });
-  } catch {
-    throw new ResumeFileError('This Word document is damaged or not a real .docx file.');
-  }
-  const xmlBytes = files['word/document.xml'];
-  if (!xmlBytes) throw new ResumeFileError('This .docx file has no document body (word/document.xml is missing).');
-  if (xmlBytes.length > 20 * 1024 * 1024) throw new ResumeFileError('This document is too large to read.');
-  const xml = new DOMParser().parseFromString(strFromU8(xmlBytes), 'application/xml');
-  if (xml.getElementsByTagName('parsererror').length) throw new ResumeFileError('The document XML could not be read; the file may be corrupted.');
-
-  const lines: string[] = [];
-  for (const p of Array.from(xml.getElementsByTagName('w:p'))) {
-    let text = '';
-    const walk = (node: Element) => {
-      for (const child of Array.from(node.children)) {
-        const tag = child.tagName;
-        if (tag === 'w:t') text += child.textContent ?? '';
-        else if (tag === 'w:tab') text += '\t';
-        else if (tag === 'w:br' || tag === 'w:cr') text += '\n';
-        else if (tag !== 'w:pPr' && tag !== 'w:rPr' && tag !== 'w:instrText') walk(child);
-      }
-    };
-    walk(p);
-    const isListItem = p.getElementsByTagName('w:numPr').length > 0;
-    // Tabs usually separate columns (title ⇥ dates); keep them as a visible separator.
-    text = text.trim().replace(/[ \u00a0]*\t[\t \u00a0]*/g, ' | ');
-    if (text) lines.push(isListItem ? `• ${text}` : text);
-  }
-  return normalizeWhitespace(lines.join('\n'));
-}
-
-/* ----------------------------------------------------------------------------
- * PDF: pdf.js text layer, regrouped into lines by vertical position
- * ------------------------------------------------------------------------- */
-
-interface PdfTextItem {
-  str: string;
-  transform: number[];
-  hasEOL?: boolean;
-}
-
-interface PdfLink {
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
-  display: string;
-  used: boolean;
-}
-
-/** Web links on a page (mailto/tel and other schemes are ignored; the address is usually in the text already). */
-async function pageLinks(page: { getAnnotations(): Promise<unknown[]> }): Promise<PdfLink[]> {
-  let annotations: unknown[];
-  try {
-    annotations = await page.getAnnotations();
-  } catch {
-    return [];
-  }
-  const links: PdfLink[] = [];
-  for (const raw of annotations) {
-    const a = raw as { subtype?: string; url?: unknown; rect?: number[] };
-    if (a.subtype !== 'Link' || typeof a.url !== 'string' || !Array.isArray(a.rect) || a.rect.length !== 4) continue;
-    let url: URL;
-    try {
-      url = new URL(a.url);
-    } catch {
-      continue;
-    }
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') continue;
-    // A bare "github.com" or "linkedin.com" link identifies nobody.
-    if (/(^|\.)(linkedin|github|gitlab)\.com$/i.test(url.hostname) && url.pathname.replace(/\/+$/, '') === '') continue;
-    const [x1, y1, x2, y2] = a.rect as [number, number, number, number];
-    const display = `${url.host.replace(/^www\./, '')}${url.pathname.replace(/\/$/, '')}`.slice(0, 200);
-    links.push({ x1: Math.min(x1, x2), y1: Math.min(y1, y2), x2: Math.max(x1, x2), y2: Math.max(y1, y2), display, used: false });
-  }
-  return links;
-}
-
-export async function extractPdfText(data: Uint8Array, opts: { workerSrc?: string } = {}): Promise<string> {
-  if (!startsWith(data, [0x25, 0x50, 0x44, 0x46, 0x2d])) throw new ResumeFileError('This file is not a valid PDF.');
-  const pdfjs = await import('pdfjs-dist');
-  if (!pdfjs.GlobalWorkerOptions.workerSrc) {
-    pdfjs.GlobalWorkerOptions.workerSrc = opts.workerSrc ?? (await import('pdfjs-dist/build/pdf.worker.min.mjs?url')).default;
-  }
-  let doc;
-  try {
-    // A copy is passed because pdf.js transfers (detaches) the buffer to its worker.
-    doc = await pdfjs.getDocument({ data: data.slice(), disableFontFace: true, useSystemFonts: false, stopAtErrors: false }).promise;
-  } catch (err) {
-    const name = (err as { name?: string })?.name;
-    if (name === 'PasswordException') throw new ResumeFileError('This PDF is password-protected. Remove the password or upload a DOCX instead.');
-    throw new ResumeFileError('This PDF could not be read; it may be damaged.');
-  }
-  try {
-    const pages = Math.min(doc.numPages, MAX_PDF_PAGES);
-    const out: string[] = [];
-    for (let i = 1; i <= pages; i++) {
-      const page = await doc.getPage(i);
-      const content = await page.getTextContent();
-      const links = await pageLinks(page);
-      let line = '';
-      let lastY: number | null = null;
-      let lastEndX = 0;
-      let gap = false;
-      for (const raw of content.items as unknown[]) {
-        const item = raw as PdfTextItem;
-        if (typeof item.str !== 'string') continue;
-        const y = item.transform[5] ?? 0;
-        const x = item.transform[4] ?? 0;
-        const size = Math.abs(item.transform[3] ?? 0) || 10;
-        const width = (item as unknown as { width?: number }).width ?? 0;
-        const columnGap = Math.max(18, size * 2.5);
-        if (lastY !== null && Math.abs(y - lastY) > 2) {
-          out.push(line);
-          line = '';
-          gap = false;
-        }
-        // A wide gap (an empty space or one stretched whitespace item) is a column
-        // break, e.g. right-aligned dates or a location: keep it as " | ".
-        if (!item.str.trim()) {
-          if (width > columnGap) gap = true;
-        } else if (line.trim() && (gap || x - lastEndX > columnGap)) {
-          line = `${line.trimEnd()} | `;
-          gap = false;
-        } else if (line && x - lastEndX > 2 && !line.endsWith(' ') && !item.str.startsWith(' ')) line += ' ';
-        line += item.str;
-        // Hyperlinked words ("LinkedIn", "GitHub", a project name) keep their target URL.
-        const link = item.str.trim() && links.find((l) => !l.used && x < l.x2 && x + width > l.x1 && y + size / 2 >= l.y1 && y + size / 2 <= l.y2);
-        if (link) {
-          link.used = true;
-          if (!line.includes(link.display)) line += ` ${link.display}`;
-        }
-        lastY = y;
-        lastEndX = x + width;
-        if (item.hasEOL) {
-          out.push(line);
-          line = '';
-          lastY = null;
-          gap = false;
-        }
-      }
-      if (line) out.push(line);
-      out.push('');
-    }
-    const text = normalizeWhitespace(out.join('\n'));
-    if (text.replace(/\s/g, '').length < 50)
-      throw new ResumeFileError('No selectable text found. This PDF may be a scanned image; paste the résumé text instead.');
-    return text;
-  } finally {
-    void doc.loadingTask.destroy();
-  }
 }
 
 export const FILE_TYPES: Record<ResumeFileKind, string> = {
@@ -191,16 +45,89 @@ export const FILE_TYPES: Record<ResumeFileKind, string> = {
   text: 'text/plain',
 };
 
-export async function readResumeFile(file: { name: string; size: number; arrayBuffer(): Promise<ArrayBuffer> }): Promise<{ text: string; kind: ResumeFileKind; data: Uint8Array }> {
+/** Decodes a text file: UTF-8 (with or without BOM), UTF-16 with BOM, else Windows-1252. */
+export function decodeText(data: Uint8Array): string {
+  if (startsWith(data, [0xff, 0xfe])) return new TextDecoder('utf-16le').decode(data.subarray(2));
+  if (startsWith(data, [0xfe, 0xff])) return new TextDecoder('utf-16be').decode(data.subarray(2));
+  const body = startsWith(data, [0xef, 0xbb, 0xbf]) ? data.subarray(3) : data;
+  if (body.includes(0)) throw new ResumeFileError('This doesn’t look like a text file. Upload a PDF, DOCX or plain-text résumé.');
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(body);
+  } catch {
+    return new TextDecoder('windows-1252').decode(body);
+  }
+}
+
+export interface TextQuality {
+  /** Problems worth showing next to the extracted profile. */
+  warnings: string[];
+  /** Set when the text is unusable; the upload stops with this message. */
+  fatal?: string;
+}
+
+const list = (ns: number[]) => (ns.length === 1 ? `Page ${ns[0]}` : `Pages ${ns.slice(0, -1).join(', ')} and ${ns[ns.length - 1]}`);
+
+/**
+ * Judges whether text extraction worked. Scanned pages have no text layer and
+ * fonts without a character map come out as private-use or replacement
+ * characters; both need OCR, which Job Copilot does not do.
+ */
+export function assessText(text: string, opts: { kind: ResumeFileKind; pageChars?: number[]; totalPages?: number }): TextQuality {
+  const warnings: string[] = [];
+  const solid = text.replace(/\s/g, '');
+  if (solid.length < 50) {
+    if (opts.kind === 'pdf') return { warnings, fatal: SCANNED_PDF };
+    return { warnings, fatal: opts.kind === 'docx' ? 'The document contains almost no text.' : 'The file is empty or has almost no text.' };
+  }
+  const bad = (solid.match(/[�-\u0000-\u0008\u000E-\u001F]/g)?.length ?? 0) + (text.match(/\(cid:\d+\)/g)?.length ?? 0) * 6;
+  const badRatio = bad / solid.length;
+  if (badRatio > 0.3)
+    return {
+      warnings,
+      fatal: 'The text in this file couldn’t be decoded (its fonts don’t map to real characters). It would need text recognition (OCR). Upload the Word (.docx) version or an OCR’d PDF instead.',
+    };
+  if (badRatio > 0.03) warnings.push('Some characters couldn’t be decoded, so names, dates or numbers may be wrong below. OCR may be required for those parts; check them before saving.');
+  const letters = solid.match(/\p{L}/gu)?.length ?? 0;
+  if (letters / solid.length < 0.45) warnings.push('Much of the text isn’t letters (tables, symbols or a damaged file). Check what was found carefully.');
+  const pages = opts.pageChars ?? [];
+  const empty = opts.kind === 'pdf' && pages.length > 1 ? pages.flatMap((n, i) => (n < 30 ? [i + 1] : [])) : [];
+  if (empty.length && empty.length < pages.length) {
+    warnings.push(`${list(empty)} ${empty.length === 1 ? 'has' : 'have'} no selectable text; ${empty.length === 1 ? 'it' : 'they'} may be scanned images (OCR may be required). Anything there is missing below.`);
+  } else if (opts.kind === 'pdf' && solid.length < 400) {
+    warnings.push('Very little text was found in this PDF. Parts of it may be images that need text recognition (OCR); anything in them is missing below.');
+  }
+  if (opts.totalPages && opts.totalPages > MAX_PDF_PAGES) warnings.push(`Only the first ${MAX_PDF_PAGES} of ${opts.totalPages} pages were read.`);
+  return { warnings };
+}
+
+export interface ResumeFileRead {
+  text: string;
+  kind: ResumeFileKind;
+  data: Uint8Array;
+  /** PDF pages read. */
+  pages?: number;
+  /** Extraction problems to show during review (partly scanned, undecodable characters, …). */
+  warnings: string[];
+}
+
+export async function readResumeFile(file: { name: string; size: number; arrayBuffer(): Promise<ArrayBuffer> }): Promise<ResumeFileRead> {
   if (file.size === 0) throw new ResumeFileError('The file is empty.');
   if (file.size > MAX_RESUME_BYTES) throw new ResumeFileError('The file is larger than 10 MB.');
   const data = new Uint8Array(await file.arrayBuffer());
+  if (!data.length) throw new ResumeFileError('The file is empty.');
   const kind = detectKind(file.name, data);
-  if (kind === 'pdf') return { kind, data, text: await extractPdfText(data) };
-  if (kind === 'docx') {
-    const text = extractDocxText(data);
-    if (text.replace(/\s/g, '').length < 50) throw new ResumeFileError('The document contains almost no text.');
-    return { kind, data, text };
+  let text: string;
+  let pages: number | undefined;
+  let quality: TextQuality;
+  if (kind === 'pdf') {
+    const pdf = await readPdf(data);
+    text = pdf.text;
+    pages = pdf.pages;
+    quality = assessText(text, { kind, pageChars: pdf.pageChars, totalPages: pdf.totalPages });
+  } else {
+    text = kind === 'docx' ? extractDocxText(data) : normalizeWhitespace(decodeText(data));
+    quality = assessText(text, { kind });
   }
-  return { kind, data, text: normalizeWhitespace(new TextDecoder().decode(data)) };
+  if (quality.fatal) throw new ResumeFileError(quality.fatal);
+  return { kind, data, text, pages, warnings: quality.warnings };
 }

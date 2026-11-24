@@ -1,15 +1,16 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { resumeChoices } from '../../lib/autofill/run';
 import { profileCompletion, profileIsEmpty } from '../../lib/matching/service';
 import { groupSkills, splitBullets } from '../../lib/profile/organize';
-import { FILE_TYPES, readResumeFile } from '../../lib/resume/files';
-import { parseResumeText, type ParsedResume } from '../../lib/resume/parse';
-import { addOriginalResume, getProfile, getResumeFile, putResumeFile, saveProfile, updateSettings } from '../../lib/storage/repo';
-import { Profile, type Education, type Experience, type Project, type StoredFile } from '../../lib/types';
-import { bytesToBase64, errorMessage, formatDate, normalizeForCompare, nowIso, uid } from '../../lib/util';
-import { Alert, Badge, Button, Card, Dialog, Field, IconButton, Input, ListInput, Loading, Meter, Select, TextArea, useToast } from '../components';
+import type { ResumeDraft } from '../../lib/resume/importer';
+import { getProfile, getResumeFile, saveProfile, updateSettings } from '../../lib/storage/repo';
+import { Profile, type Education, type Experience, type Project, type ResumeVersion } from '../../lib/types';
+import { errorMessage, formatDate, uid } from '../../lib/util';
+import { Badge, Button, Card, Field, IconButton, Input, ListInput, Loading, Meter, Select, TextArea, useToast } from '../components';
 import { useProfile, useResumes, useSettings } from '../hooks';
 import { Icon } from '../icons';
+import { ImportReview } from '../resume/ImportReview';
+import { ResumeDrop } from '../resume/ResumeDrop';
 import { Chip, range, SectionTitle, Val } from './shared';
 
 /** Reads the latest profile, applies `fn` and saves it (so edits never overwrite each other). */
@@ -34,30 +35,18 @@ const PROJECT_KIND: Array<[Project['kind'], string]> = [
   ['professional', 'Professional'],
 ];
 
-type Parsed = ParsedResume & { rawText: string; fileName: string; file?: StoredFile };
-
 export function ProfileTab() {
   const profile = useProfile();
-  const [parsed, setParsed] = useState<Parsed | null>(null);
-  const [warnings, setWarnings] = useState<string[]>([]);
+  // A parsed upload waiting for review. Nothing is saved until the review is confirmed.
+  const [draft, setDraft] = useState<ResumeDraft | null>(null);
   if (!profile) return <Loading />;
+  if (draft) return <ImportReview draft={draft} profile={profile} onCancel={() => setDraft(null)} onSaved={() => setDraft(null)} />;
   const empty = profileIsEmpty(profile);
   const completion = profileCompletion(profile);
 
   return (
     <div className="flex flex-col gap-3">
-      <ResumeFiles empty={empty} onParsed={async (p) => {
-        // First upload: nothing to compare with, so it becomes the profile and is shown below for review.
-        if (empty) {
-          await applyParsed(p, 'replace');
-          setWarnings(p.warnings);
-        } else setParsed(p);
-      }} />
-      {warnings.map((w) => (
-        <Alert key={w} tone="warn">
-          {w}
-        </Alert>
-      ))}
+      <ResumeFiles empty={empty} onDraft={setDraft} />
 
       {!empty && (
         <>
@@ -73,57 +62,35 @@ export function ProfileTab() {
           <SkillsCard profile={profile} />
           <ProjectsList profile={profile} />
           <EducationList profile={profile} />
-          <CertificationsCard profile={profile} />
+          <StringListCard profile={profile} field="certifications" title="Certifications" />
+          <StringListCard profile={profile} field="languages" title="Languages" />
+          <StringListCard profile={profile} field="awards" title="Awards & honours" />
+          <ExtrasCard profile={profile} />
           <p className="text-center text-[12px] text-muted">Autofill and suggested answers use only what’s here. Fix anything that was read wrong.</p>
         </>
       )}
-      <ReviewDialog parsed={parsed} profile={profile} onClose={() => setParsed(null)} onWarnings={setWarnings} />
     </div>
   );
 }
 
 /* ----------------------------------------------------------------------------
- * Résumé files and upload review
+ * Résumé files: upload, versions and the file autofill attaches
  * ------------------------------------------------------------------------- */
 
-async function applyParsed(parsed: Parsed, mode: 'replace' | 'merge'): Promise<void> {
-  const now = nowIso();
-  const c = parsed.content;
-  const original = await addOriginalResume({ id: uid('res'), name: `Original — ${parsed.fileName}`, kind: 'original', content: c, rawText: parsed.rawText, sourceFileName: parsed.fileName, createdAt: now, updatedAt: now });
-  // The file itself is kept (locally) so Autofill can attach your own PDF / DOCX.
-  if (parsed.file) await putResumeFile(original.id, parsed.file);
-  await patchProfile((p) => (mode === 'replace' ? { ...p, ...c, preferences: p.preferences } : mergeProfile(p, c)));
+/** Uploads grouped by résumé (versions of the same résumé share a family), newest first. */
+function families(originals: ResumeVersion[]): Array<{ id: string; versions: ResumeVersion[] }> {
+  const by = new Map<string, ResumeVersion[]>();
+  for (const r of [...originals].sort((a, b) => b.createdAt.localeCompare(a.createdAt))) {
+    const k = r.family ?? r.id;
+    by.set(k, [...(by.get(k) ?? []), r]);
+  }
+  return [...by.entries()].map(([id, versions]) => ({ id, versions }));
 }
 
-const key = (...xs: string[]) => normalizeForCompare(xs.join(' '));
-
-/** Adds only entries that aren't already in the profile; fills empty basics. */
-function mergeProfile(p: Profile, c: ParsedResume['content']): Profile {
-  const basics = { ...p.basics };
-  for (const k of ['name', 'headline', 'email', 'phone', 'location', 'summary'] as const) if (!basics[k]) basics[k] = c.basics[k];
-  basics.links = Array.from(new Set([...p.basics.links, ...c.basics.links]));
-  const roles = new Set(p.experience.map((e) => key(e.title, e.company)));
-  const schools = new Set(p.education.map((e) => key(e.institution, e.degree)));
-  const projects = new Set(p.projects.map((x) => key(x.name)));
-  return {
-    ...p,
-    basics,
-    skills: Array.from(new Set([...p.skills, ...c.skills])),
-    experience: [...p.experience, ...c.experience.filter((e) => !roles.has(key(e.title, e.company)))],
-    education: [...p.education, ...c.education.filter((e) => !schools.has(key(e.institution, e.degree)))],
-    projects: [...p.projects, ...c.projects.filter((x) => !projects.has(key(x.name)))],
-    certifications: Array.from(new Set([...p.certifications, ...c.certifications])),
-  };
-}
-
-function ResumeFiles({ empty, onParsed }: { empty: boolean; onParsed: (p: Parsed) => Promise<void> }) {
+function ResumeFiles({ empty, onDraft }: { empty: boolean; onDraft: (d: ResumeDraft) => void }) {
   const resumes = useResumes();
   const settings = useSettings();
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [withFiles, setWithFiles] = useState<Set<string>>(new Set());
-  const toast = useToast();
   const originals = (resumes ?? []).filter((r) => r.kind === 'original').sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
   useEffect(() => {
@@ -135,131 +102,48 @@ function ResumeFiles({ empty, onParsed }: { empty: boolean; onParsed: (p: Parsed
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [originals.map((r) => r.id).join(',')]);
 
-  const onFile = async (file: File | undefined) => {
-    if (!file) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const { text, kind, data } = await readResumeFile(file);
-      const stored = kind === 'text' ? undefined : { name: file.name, type: FILE_TYPES[kind], size: data.length, base64: bytesToBase64(data), savedAt: nowIso() };
-      await onParsed({ ...parseResumeText(text), rawText: text, fileName: file.name, file: stored });
-      if (empty) toast('Résumé read. Check what was found below.', 'good');
-    } catch (e) {
-      setError(errorMessage(e));
-    } finally {
-      setBusy(false);
-      if (fileRef.current) fileRef.current.value = '';
-    }
-  };
+  if (empty)
+    return (
+      <Card title="Résumé">
+        <p className="mb-2 text-[12.5px] text-muted">Upload your résumé once. Job Copilot reads it here in your browser and shows what it found (roles, education, skills, projects) so you can check it before saving. Autofill and suggested answers then reuse it.</p>
+        <ResumeDrop onDraft={onDraft} label="Upload résumé" />
+      </Card>
+    );
 
-  const upload = (
-    <>
-      <input ref={fileRef} type="file" id="resume-file" className="sr-only" accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain" onChange={(e) => void onFile(e.target.files?.[0])} />
-      <Button size="sm" variant={empty ? 'primary' : 'secondary'} icon={<Icon.Upload size={14} />} busy={busy} onClick={() => fileRef.current?.click()}>
-        {empty ? 'Upload résumé' : 'Upload new'}
-      </Button>
-    </>
-  );
-
+  const groups = families(originals);
   return (
-    <Card title="Résumé" subtitle={originals[0]?.sourceFileName ? `Read from ${originals[0].sourceFileName}` : empty ? undefined : 'Entered by hand'} actions={upload}>
-      {empty ? (
-        <p className="text-[12.5px] text-muted">Upload your résumé (PDF or Word). It’s read here in your browser; nothing is uploaded. You’ll see everything that was found: roles, skills, projects, education. Autofill and suggested answers use it.</p>
-      ) : (
-        settings &&
-        resumes && (
-          <Field label="Autofill attaches">
-            {(id) => (
-              <Select id={id} value={settings.autofill.attach} onChange={(e) => void updateSettings((s) => ({ ...s, autofill: { ...s.autofill, attach: e.target.value } }))}>
-                {resumeChoices(resumes, withFiles).map((c) => (
-                  <option key={c.value} value={c.value}>
-                    {c.label}
-                  </option>
-                ))}
-              </Select>
-            )}
-          </Field>
-        )
+    <Card title="Résumé" subtitle={originals[0]?.sourceFileName ? `Read from ${originals[0].sourceFileName}` : 'Entered by hand'}>
+      {settings && resumes && (
+        <Field label="Autofill attaches" hint="Attached only when an application asks for a résumé, and reported only once the page accepts the file.">
+          {(id) => (
+            <Select id={id} value={settings.autofill.attach} onChange={(e) => void updateSettings((s) => ({ ...s, autofill: { ...s.autofill, attach: e.target.value } }))}>
+              {resumeChoices(resumes, withFiles).map((c) => (
+                <option key={c.value} value={c.value}>
+                  {c.label}
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
       )}
-      {originals.length > 1 && <p className="mt-1.5 text-[11.5px] text-muted">{originals.length} uploads kept (latest {formatDate(originals[0]!.createdAt)}). Older ones are in the dashboard’s Résumé Studio.</p>}
-      {error && (
-        <div className="mt-2">
-          <Alert tone="bad">{error}</Alert>
-        </div>
-      )}
-    </Card>
-  );
-}
-
-function ReviewDialog({ parsed, profile, onClose, onWarnings }: { parsed: Parsed | null; profile: Profile; onClose: () => void; onWarnings: (w: string[]) => void }) {
-  const toast = useToast();
-  const [busy, setBusy] = useState(false);
-  const apply = async (mode: 'replace' | 'merge') => {
-    if (!parsed) return;
-    setBusy(true);
-    try {
-      await applyParsed(parsed, mode);
-      onWarnings(parsed.warnings);
-      toast(mode === 'replace' ? 'Profile replaced with the new résumé' : 'New entries added to your profile', 'good');
-      onClose();
-    } catch (e) {
-      toast(errorMessage(e), 'bad');
-    } finally {
-      setBusy(false);
-    }
-  };
-  const c = parsed?.content;
-  const roles = new Set(profile.experience.map((e) => key(e.title, e.company)));
-  const newRoles = c?.experience.filter((e) => !roles.has(key(e.title, e.company))) ?? [];
-  const newSkills = c?.skills.filter((s) => !profile.skills.some((x) => x.toLowerCase() === s.toLowerCase())) ?? [];
-  return (
-    <Dialog
-      open={!!parsed}
-      onClose={onClose}
-      title="Review the new résumé"
-      footer={
-        <>
-          <Button variant="ghost" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button busy={busy} onClick={() => void apply('merge')}>
-            Add new entries
-          </Button>
-          <Button variant="primary" busy={busy} onClick={() => void apply('replace')}>
-            Replace
-          </Button>
-        </>
-      }
-    >
-      {c && (
-        <div className="flex flex-col gap-2 text-[13px]">
-          {parsed!.warnings.map((w) => (
-            <Alert key={w} tone="warn">
-              {w}
-            </Alert>
+      {groups.length > 0 && (
+        <ul className="mt-2 flex flex-col gap-1 text-[12px]" aria-label="Uploaded résumés">
+          {groups.map((g) => (
+            <li key={g.id} className="flex items-center gap-1.5">
+              <Icon.Doc size={13} />
+              <span className="min-w-0 flex-1 truncate" title={g.versions.map((v) => `${v.sourceFileName ?? v.name} (${formatDate(v.createdAt)})`).join('\n')}>
+                {g.versions[0]!.sourceFileName ?? g.versions[0]!.name}
+              </span>
+              {g.versions.length > 1 && <Badge>{g.versions.length} versions</Badge>}
+              <span className="text-muted">{formatDate(g.versions[0]!.createdAt)}</span>
+            </li>
           ))}
-          <p className="text-muted">
-            Found {c.experience.length} roles · {c.education.length} education · {c.projects.length} projects · {c.skills.length} skills
-          </p>
-          <ul className="flex flex-col gap-1">
-            {c.experience.map((e) => (
-              <li key={e.id} className="rounded-md border border-line px-2 py-1.5">
-                <span className="font-medium">{e.title || '(no title)'}</span> · {e.company || '(no company)'} <span className="text-muted">{range(e.start, e.end)}</span>
-                {!roles.has(key(e.title, e.company)) && (
-                  <span className="ml-1">
-                    <Badge tone="accent">new</Badge>
-                  </span>
-                )}
-              </li>
-            ))}
-          </ul>
-          {newSkills.length > 0 && <p>New skills: {newSkills.join(', ')}</p>}
-          <p className="text-[12px] text-muted">
-            <b>Replace</b> makes this résumé your profile (job preferences are kept). <b>Add new entries</b> keeps your edits and adds {newRoles.length} new role{newRoles.length === 1 ? '' : 's'}, new skills and projects.
-          </p>
-        </div>
+        </ul>
       )}
-    </Dialog>
+      <div className="mt-2.5">
+        <ResumeDrop compact onDraft={onDraft} label="Upload a new or updated résumé" hint="You’ll see what’s new or different before anything changes." />
+      </div>
+    </Card>
   );
 }
 
@@ -439,6 +323,9 @@ function ExperienceList({ profile }: { profile: Profile }) {
       <Field label="What you did (one per line)" className="min-[380px]:col-span-2">
         {(id) => <ListInput id={id} rows={5} value={e.bullets} onChange={(bullets) => set({ bullets })} />}
       </Field>
+      <Field label="Technologies (comma-separated)" className="min-[380px]:col-span-2">
+        {(id) => <ListInput id={id} value={e.skills ?? []} onChange={(skills) => set({ skills })} />}
+      </Field>
     </div>
   );
   return (
@@ -473,6 +360,7 @@ function ExperienceList({ profile }: { profile: Profile }) {
                     <p className="text-[12px] text-muted">{range(e.start, e.end) || 'Dates not found'}</p>
                     <Bullets title={achievements.length && responsibilities.length ? 'Achievements' : undefined} items={achievements} />
                     <Bullets title={achievements.length && responsibilities.length ? 'Responsibilities' : undefined} items={responsibilities} />
+                    {(e.skills?.length ?? 0) > 0 && <p className="mt-1 text-[12px] text-muted">{e.skills!.join(' · ')}</p>}
                   </div>
                 }
               />
@@ -616,6 +504,7 @@ function EducationList({ profile }: { profile: Profile }) {
       <Field label="Start (YYYY-MM)">{(id) => <Input id={id} value={x.start} onChange={(e) => set({ start: e.target.value.trim() })} />}</Field>
       <Field label="End or expected (YYYY-MM)">{(id) => <Input id={id} value={x.end} onChange={(e) => set({ end: e.target.value.trim() })} />}</Field>
       <Field label="Details (one per line)" className="min-[380px]:col-span-2">{(id) => <ListInput id={id} rows={2} value={x.details} onChange={(details) => set({ details })} />}</Field>
+      <Field label="Relevant coursework (comma-separated)" className="min-[380px]:col-span-2">{(id) => <ListInput id={id} value={x.coursework ?? []} onChange={(coursework) => set({ coursework })} />}</Field>
     </div>
   );
   return (
@@ -639,6 +528,7 @@ function EducationList({ profile }: { profile: Profile }) {
                   <p>{[e.degree, e.field].filter(Boolean).join(', ') || <span className="text-warn italic">Degree not found</span>}</p>
                   {range(e.start, e.end) && <p className="text-[12px] text-muted">{range(e.start, e.end)}</p>}
                   {e.details.length > 0 && <p className="text-[12.5px] text-muted">{e.details.join(' · ')}</p>}
+                  {(e.coursework?.length ?? 0) > 0 && <p className="text-[12px] text-muted">Coursework: {e.coursework!.join(', ')}</p>}
                 </div>
               }
             />
@@ -649,16 +539,40 @@ function EducationList({ profile }: { profile: Profile }) {
   );
 }
 
-function CertificationsCard({ profile }: { profile: Profile }) {
+type StringListField = 'certifications' | 'languages' | 'awards';
+
+function StringListCard({ profile, field, title }: { profile: Profile; field: StringListField; title: string }) {
+  const items = profile[field] ?? [];
   return (
-    <ListCard title="Certifications" count={profile.certifications.length}>
+    <ListCard title={title} count={items.length}>
       <Editable
-        label="certifications"
-        value={{ items: profile.certifications }}
-        onSave={(v) => patchProfile((p) => ({ ...p, certifications: v.items }))}
-        view={profile.certifications.length ? <Bullets items={profile.certifications} /> : <p className="text-[12.5px] text-muted">None listed.</p>}
-        form={(v, set) => <Field label="One per line">{(id) => <ListInput id={id} rows={3} value={v.items} onChange={(items) => set({ items })} />}</Field>}
+        label={title.toLowerCase()}
+        value={{ items }}
+        onSave={(v) => patchProfile((p) => ({ ...p, [field]: v.items }))}
+        view={items.length ? <Bullets items={items} /> : <p className="text-[12.5px] text-muted">None listed.</p>}
+        form={(v, set) => <Field label="One per line">{(id) => <ListInput id={id} rows={3} value={v.items} onChange={(next) => set({ items: next })} />}</Field>}
       />
     </ListCard>
+  );
+}
+
+/** Other résumé sections kept as written (publications, leadership, interests). */
+function ExtrasCard({ profile }: { profile: Profile }) {
+  const extras = profile.extras ?? [];
+  if (!extras.length) return null;
+  return (
+    <>
+      {extras.map((x, i) => (
+        <ListCard key={x.heading} title={x.heading} count={x.items.length}>
+          <Editable
+            label={x.heading}
+            value={{ items: x.items }}
+            onSave={(v) => patchProfile((p) => ({ ...p, extras: (p.extras ?? []).map((y, j) => (j === i ? { ...y, items: v.items } : y)).filter((y) => y.items.length) }))}
+            view={<Bullets items={x.items} />}
+            form={(v, set) => <Field label="One per line">{(id) => <ListInput id={id} rows={3} value={v.items} onChange={(next) => set({ items: next })} />}</Field>}
+          />
+        </ListCard>
+      ))}
+    </>
   );
 }

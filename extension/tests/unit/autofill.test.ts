@@ -21,6 +21,10 @@ const DATA: FillData = {
   school: 'University of Waterloo',
   degree: 'Bachelor of Science',
   discipline: 'Computer Science',
+  address: '',
+  state: '',
+  postalCode: '',
+  country: '',
 };
 
 const NO_ANSWERS = { standard: {}, saved: [], tickConsent: false };
@@ -149,10 +153,11 @@ describe('form autofill', () => {
       <label for="loc">Location (City)</label><input id="loc" role="combobox">`;
     const r = await fillDocument(document, req());
     expect($('#c').value).toBe('Senior Sof');
-    // A picker with no matching suggestion is cleared; free-text location keeps the typed value.
+    // A picker with no matching suggestion is cleared and reported as not filled; free-text location keeps the typed value.
     expect($('#s').value).toBe('');
     expect($('#loc').value).toBe('Toronto, ON');
-    expect(r.unanswered.map((u) => u.label)).toEqual(['School']);
+    expect(r.failed?.map((u) => u.label)).toEqual(['School']);
+    expect(r.filled.map((f) => f.label)).not.toContain('School');
   }, 15_000);
 
   it('recognises résumé file inputs but not cover-letter ones', async () => {

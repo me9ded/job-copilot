@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply: Platform Engineer, Acme Robotics (step 2 of 2)</title>
+<style>body { font: 15px system-ui, sans-serif; margin: 0 auto; max-width: 760px; padding: 16px; } label { display: block; margin-top: 12px; } input, select { display: block; margin-top: 4px; min-width: 260px; }</style>
+</head>
+<body>
+  <h1>Platform Engineer: experience and education</h1>
+  <form id="app2">
+    <h2>Most recent job</h2>
+    <label for="jt">Job title</label><input id="jt" name="jt">
+    <label for="co">Company</label><input id="co" name="co">
+    <h2>Education</h2>
+    <label for="school">School or university</label><input id="school" name="school">
+    <label for="deg">Highest degree</label>
+    <select id="deg" name="deg"><option value="">Select…</option><option>High school diploma</option><option>Associate's Degree</option><option>Bachelor's Degree</option><option>Master's Degree</option><option>Doctorate</option></select>
+    <label for="major">Field of study</label><input id="major" name="major">
+    <button type="submit" id="submit">Submit application</button>
+  </form>
+  <script>
+    window.submitted = null;
+    window.step1 = JSON.parse(sessionStorage.getItem('step1') || 'null');
+    document.getElementById('app2').addEventListener('submit', (e) => {
+      e.preventDefault();
+      window.submitted = Object.fromEntries(new FormData(e.target));
+    });
+  </script>
+</body>
+</html>

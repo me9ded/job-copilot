@@ -17,6 +17,10 @@ const DATA: FillData = {
   school: 'Algonquin College',
   degree: 'Advanced Diploma',
   discipline: 'Computer Engineering Technology',
+  address: '',
+  state: '',
+  postalCode: '',
+  country: '',
 };
 const RESUME = { name: 'cv.pdf', type: 'application/pdf', base64: 'JVBERi0=' };
 const NO_ANSWERS = { standard: {}, saved: [], tickConsent: false };
@@ -110,13 +114,15 @@ describe('search-style pickers', () => {
 });
 
 describe('phone numbers', () => {
-  it('leaves Workday’s Country Phone Code picker alone and types the national number in the phone box', async () => {
+  it('gives Workday’s Country Phone Code box only the code and types the national number in the phone box', async () => {
     document.body.innerHTML = `
       <label for="cc">Country Phone Code*</label><input id="cc" data-automation-id="countryPhoneCode">
       <label for="ph">Phone Number*</label><input id="ph" data-automation-id="phone-number">`;
-    await runApplication(document, req());
-    expect($('#cc').value).toBe('');
+    const r = await runApplication(document, req());
+    // The code comes from the saved number (+1), never the whole number.
+    expect($('#cc').value).toBe('+1');
     expect($('#ph').value).toBe('(613) 555-0100');
+    expect(r.filled.find((f) => f.key === 'phoneCode')?.basis).toBe('inferred');
   });
 
   it('keeps the full number when there is no separate country code', async () => {

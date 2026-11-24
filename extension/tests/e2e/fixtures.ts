@@ -56,7 +56,8 @@ export const test = base.extend<
     async ({}, use) => {
       const dir = resolve(HERE, '../../../backend');
       const uvicorn = resolve(dir, '.venv/bin/uvicorn');
-      if (!existsSync(uvicorn)) return use(null);
+      // A virtualenv whose Python is gone (e.g. removed by a Homebrew upgrade) can't start: treat it as not installed.
+      if (!existsSync(uvicorn) || !existsSync(resolve(dir, '.venv/bin/python'))) return use(null);
       const token = 'e2e-token-0123456789abcdefghijk';
       const port = 18_000 + Math.floor(Math.random() * 1000);
       const db = resolve(mkdtempSync(resolve(tmpdir(), 'jc-')), 'e2e.db');

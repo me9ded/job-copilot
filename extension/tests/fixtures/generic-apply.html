@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Apply: Platform Engineer, Acme Robotics</title>
+<style>
+  body { font: 15px system-ui, sans-serif; margin: 0 auto; max-width: 760px; padding: 16px; }
+  label, .q { display: block; margin-top: 12px; }
+  input, select, textarea, .pick { display: block; margin-top: 4px; min-width: 260px; }
+  .opts { position: absolute; z-index: 5; background: #fff; border: 1px solid #888; list-style: none; margin: 0; padding: 4px; }
+  .opts li, #prov-list li { padding: 4px 8px; cursor: pointer; }
+  .yn button[aria-pressed=true] { background: #134; color: #fff; }
+  .drop { border: 2px dashed #888; padding: 12px; margin-top: 12px; }
+  iframe { display: block; width: 100%; height: 130px; border: 1px solid #ddd; margin-top: 12px; }
+</style>
+</head>
+<body>
+<!-- Site chrome: never part of the application. -->
+<header>
+  <a href="/">Acme Robotics careers</a>
+  <form role="search"><input type="search" id="q" name="q" aria-label="Search jobs"></form>
+</header>
+
+<main>
+  <h1>Platform Engineer</h1>
+  <form id="app" novalidate>
+    <h2>Your details</h2>
+    <label for="fname">First name *</label><input id="fname" name="fname" required>
+    <!-- No label at all: only the autocomplete hint says what this is. -->
+    <input id="lname" name="f_2" autocomplete="family-name">
+    <!-- A controlled input: the page renders it from its own state, which only input events change. -->
+    <label for="email">Email address *</label><input id="email" name="email" required>
+    <!-- A mask that reformats whatever it is given. -->
+    <label for="phone">Mobile phone</label><input id="phone" name="phone" inputmode="tel">
+
+    <!-- A custom dropdown whose options are rendered at the end of <body> (a portal). -->
+    <span class="q" id="country-l">Country *</span>
+    <button type="button" class="pick" id="country" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="country-l">Select…</button>
+    <input type="hidden" id="country-v" name="country">
+
+    <!-- Type-ahead: the typed text is cleared on blur unless an option was chosen. -->
+    <label for="prov">Province / State</label>
+    <input id="prov" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="prov-list" autocomplete="off">
+    <ul id="prov-list" role="listbox" hidden></ul>
+
+    <!-- In a shadow root; the host listens for composed input events. -->
+    <city-field></city-field>
+
+    <h2>Work eligibility</h2>
+    <div class="yn" role="group" aria-labelledby="auth-l">
+      <p class="q" id="auth-l">Are you legally authorized to work in Canada? *</p>
+      <button type="button" aria-pressed="false" data-v="yes">Yes</button>
+      <button type="button" aria-pressed="false" data-v="no">No</button>
+    </div>
+    <label for="spons">Will you now or in the future require visa sponsorship? *</label>
+    <select id="spons" name="spons" required><option value="">Select…</option><option>Yes</option><option>No</option></select>
+    <div id="visa-box" hidden><label for="visa">Which visa do you hold?</label><input id="visa" name="visa"></div>
+
+    <div id="late"></div>
+
+    <section>
+      <h3>Office: Toronto</h3>
+      <fieldset><legend>Willing to work on-site 3 days a week?</legend>
+        <label><input type="radio" name="onsite-tor" value="yes"> Yes</label><label><input type="radio" name="onsite-tor" value="no"> No</label></fieldset>
+    </section>
+    <section>
+      <h3>Office: Montréal</h3>
+      <fieldset><legend>Willing to work on-site 3 days a week?</legend>
+        <label><input type="radio" name="onsite-mtl" value="yes"> Yes</label><label><input type="radio" name="onsite-mtl" value="no"> No</label></fieldset>
+    </section>
+
+    <!-- Refuses every value: must be reported as not filled, never as filled. -->
+    <label for="site">Portfolio website</label><input id="site" name="site">
+
+    <div class="drop">
+      <label for="cv">Upload your résumé / CV</label>
+      <input type="file" id="cv" name="cv" accept=".pdf,.doc,.docx" hidden>
+      <span id="cv-name">No file chosen</span>
+    </div>
+
+    <iframe id="more" title="More questions" src="apply-frame.html"></iframe>
+    <!-- Same server under another host name: a frame the E2E build has no access to. -->
+    <iframe id="partner" title="Partner assessment"></iframe>
+
+    <h2>Voluntary self-identification</h2>
+    <label for="gender">Gender</label>
+    <select id="gender" name="gender"><option value="">Select…</option><option>Male</option><option>Female</option><option>Non-binary</option><option>I don't wish to answer</option></select>
+
+    <h2>Questions</h2>
+    <label for="why">Why do you want to work at Acme Robotics? *</label>
+    <textarea id="why" name="why" required maxlength="1000"></textarea>
+    <label><input type="checkbox" id="privacy" name="privacy"> I agree to the privacy policy</label>
+
+    <button type="submit" id="next">Next: experience</button>
+  </form>
+</main>
+
+<footer>
+  <form id="newsletter"><p>Get job alerts by email</p><label for="alert">Email</label><input id="alert" type="email"><button type="button">Subscribe</button></form>
+</footer>
+
+<script>
+  window.seen = {};
+  window.submitted = null;
+  window.model = { email: '' };
+  const $ = (id) => document.getElementById(id);
+
+  // Controlled email: re-rendered from state on change and blur.
+  const email = $('email');
+  email.addEventListener('input', () => (model.email = email.value));
+  email.addEventListener('change', () => {
+    email.value = model.email;
+    // A section that appears only once the email is entered.
+    if (/@/.test(model.email) && !$('title')) {
+      setTimeout(() => {
+        $('late').innerHTML = '<h2>Current role</h2><label for="title">Current job title</label><input id="title" name="title"><label for="org">Current employer</label><input id="org" name="org">';
+      }, 300);
+    }
+  });
+  email.addEventListener('blur', () => (email.value = model.email));
+
+  // Phone mask: (613) 555-0142.
+  const phone = $('phone');
+  phone.addEventListener('input', () => {
+    let d = phone.value.replace(/\D/g, '');
+    if (d.length === 11 && d.startsWith('1')) d = d.slice(1);
+    d = d.slice(0, 10);
+    phone.value = d.length > 6 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : d.length > 3 ? `(${d.slice(0, 3)}) ${d.slice(3)}` : d;
+    seen.phone = phone.value;
+  });
+
+  // Portal dropdown.
+  const country = $('country');
+  let list = null;
+  const closeList = () => { list?.remove(); list = null; country.setAttribute('aria-expanded', 'false'); };
+  country.addEventListener('click', () => {
+    if (list) return closeList();
+    list = document.createElement('ul');
+    list.setAttribute('role', 'listbox');
+    list.className = 'opts';
+    const r = country.getBoundingClientRect();
+    list.style.left = `${r.left + scrollX}px`;
+    list.style.top = `${r.bottom + scrollY}px`;
+    for (const name of ['United States', 'Canada', 'Mexico', 'United Kingdom']) {
+      const li = document.createElement('li');
+      li.setAttribute('role', 'option');
+      li.textContent = name;
+      li.addEventListener('click', () => { country.textContent = name; $('country-v').value = name; seen.country = name; closeList(); });
+      list.append(li);
+    }
+    document.body.append(list);
+    country.setAttribute('aria-expanded', 'true');
+  });
+
+  // Type-ahead province.
+  const REGIONS = ['Alberta', 'British Columbia', 'Manitoba', 'New Brunswick', 'Nova Scotia', 'Ontario', 'Quebec', 'Saskatchewan', 'New York', 'Ohio', 'Oregon'];
+  const prov = $('prov');
+  const provList = $('prov-list');
+  let chosen = '';
+  prov.addEventListener('input', () => {
+    chosen = '';
+    const q = prov.value.trim().toLowerCase();
+    provList.innerHTML = '';
+    for (const r of q ? REGIONS.filter((x) => x.toLowerCase().includes(q)) : []) {
+      const li = document.createElement('li');
+      li.setAttribute('role', 'option');
+      li.textContent = r;
+      li.addEventListener('mousedown', (e) => e.preventDefault());
+      li.addEventListener('click', () => { chosen = r; prov.value = r; seen.province = r; provList.hidden = true; prov.setAttribute('aria-expanded', 'false'); });
+      provList.append(li);
+    }
+    provList.hidden = !provList.children.length;
+    prov.setAttribute('aria-expanded', String(!provList.hidden));
+  });
+  prov.addEventListener('blur', () => setTimeout(() => { if (prov.value !== chosen) prov.value = ''; provList.hidden = true; }, 0));
+
+  // Shadow DOM field.
+  customElements.define('city-field', class extends HTMLElement {
+    constructor() {
+      super();
+      this.attachShadow({ mode: 'open' }).innerHTML = '<label for="c">City</label><input id="c" name="city">';
+    }
+  });
+  document.querySelector('city-field').addEventListener('input', (e) => (seen.city = e.composedPath()[0].value));
+
+  // Yes / No buttons.
+  for (const b of document.querySelectorAll('.yn button')) {
+    b.addEventListener('click', () => {
+      for (const o of document.querySelectorAll('.yn button')) o.setAttribute('aria-pressed', String(o === b));
+      seen.auth = b.dataset.v;
+    });
+  }
+
+  // A follow-up question shown only for "Yes".
+  $('spons').addEventListener('change', () => setTimeout(() => ($('visa-box').hidden = $('spons').value !== 'Yes'), 150));
+
+  // A field that never keeps a value.
+  const site = $('site');
+  for (const type of ['input', 'change', 'keyup', 'blur']) site.addEventListener(type, () => setTimeout(() => (site.value = ''), 0));
+
+  // Hidden file input behind a drop zone.
+  $('cv').addEventListener('change', () => { $('cv-name').textContent = $('cv').files[0]?.name ?? 'No file chosen'; seen.cv = $('cv').files[0]?.name; });
+
+  $('partner').src = `${location.origin.replace('127.0.0.1', 'localhost')}/apply-frame.html`;
+
+  // "Next" loads the next page.
+  $('app').addEventListener('submit', (e) => {
+    e.preventDefault();
+    sessionStorage.setItem('step1', JSON.stringify({ email: model.email, why: $('why').value }));
+    location.href = 'generic-apply-2.html';
+  });
+</script>
+</body>
+</html>
