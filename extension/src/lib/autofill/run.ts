@@ -212,20 +212,33 @@ async function callFiller<T>(tabId: number, method: 'fill' | 'answer' | 'submit'
   return results.map((r) => (r.result ?? null) as T | null);
 }
 
-function waitForLoad(tabId: number, timeoutMs = 20_000): Promise<void> {
-  return new Promise((resolve) => {
-    const done = () => {
-      browser.tabs.onUpdated.removeListener(onUpdated);
-      clearTimeout(timer);
-      // Give single-page apps a moment to render the form.
-      setTimeout(resolve, 800);
-    };
-    const onUpdated = (id: number, info: { status?: string }) => {
-      if (id === tabId && info.status === 'complete') done();
-    };
-    const timer = setTimeout(done, timeoutMs);
-    browser.tabs.onUpdated.addListener(onUpdated);
-  });
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Waits for the tab to leave `fromUrl` and finish loading. Polls the tab
+ * instead of waiting for an onUpdated event, which was missed whenever the new
+ * page finished loading before the listener was added (then it always waited
+ * the full timeout). If the tab's address doesn't change at all (the form
+ * opened inside a frame) it carries on after a few seconds.
+ */
+async function waitForLoad(tabId: number, fromUrl: string | undefined, timeoutMs = 20_000, unchangedMs = 5_000): Promise<void> {
+  const start = Date.now();
+  let changed = false;
+  while (Date.now() - start < timeoutMs) {
+    let tab: { url?: string; pendingUrl?: string; status?: string };
+    try {
+      tab = await browser.tabs.get(tabId);
+    } catch {
+      return;
+    }
+    const url = tab.pendingUrl || tab.url;
+    if (url && url !== fromUrl) changed = true;
+    if (changed && tab.status === 'complete' && !tab.pendingUrl) break;
+    if (!changed && Date.now() - start > unchangedMs) break;
+    await sleep(250);
+  }
+  // Give single-page apps a moment to render the form.
+  await sleep(800);
 }
 
 /**
@@ -237,6 +250,7 @@ export async function autofillTab(tabId: number, req: FillRequest): Promise<Fill
   await checkTab(tabId);
   let combined = null as FillReport | null;
   for (let hop = 0; hop < 3; hop++) {
+    const fromUrl = await tabUrl(tabId);
     const results = await callFiller<FillReport & { restricted?: string }>(tabId, 'fill', req);
     const reports: FillReport[] = [];
     for (const v of results) {
@@ -250,7 +264,7 @@ export async function autofillTab(tabId: number, req: FillRequest): Promise<Fill
     // Earlier pages' results are kept; the current page decides why filling stopped.
     combined = combined ? merge([report, { ...combined, stop: 'no_form' }]) : report;
     if (report.stop !== 'navigating') break;
-    await waitForLoad(tabId);
+    await waitForLoad(tabId, fromUrl);
     await checkTab(tabId);
   }
   return combined!;

@@ -169,7 +169,8 @@ const PROFILE_RULES: Array<{ key: AutofillKey; re: RegExp; not?: RegExp }> = [
   { key: 'github', re: /git ?hub/ },
   { key: 'website', re: /portfolio|website|web site|personal (site|url|page)|home ?page|\bblog\b|^urls? other$|^url$/, not: /linked ?in|git ?hub|twitter|facebook|instagram|company/ },
   { key: 'email', re: /e ?mail/ },
-  { key: 'phone', re: /phone|mobile|\btel\b|telephone|\bcell\b/, not: /type|country code|extension|\bext\b/ },
+  // Not Workday's "Country Phone Code" picker: typing the number there also used up the phone value before the real phone box.
+  { key: 'phone', re: /phone|mobile|\btel\b|telephone|\bcell\b/, not: /type|country|(dial(ing)?|calling|phone|area) code|extension|\bext\b/ },
   { key: 'firstName', re: /\b(first|given|fore) ?name\b|firstname|givenname|^fname$/ },
   { key: 'lastName', re: /\b(last|family|sur) ?name\b|lastname|surname|familyname|^lname$/ },
   { key: 'fullName', re: /^(full |your |legal |candidate |applicant )?name$|\bfull ?name\b|\byour name\b|^system ?field name$/ },
@@ -298,6 +299,34 @@ export function descriptors(el: HTMLElement): string[] {
   return out;
 }
 
+/**
+ * What the section around a file input is about. Upload widgets (Workday's drop
+ * zone, many custom careers sites) put "Resume/CV" in a heading or an automation
+ * id several levels above the hidden input, past where `descriptors` looks.
+ */
+function sectionContext(el: HTMLElement): string[] {
+  const out: string[] = [];
+  let n: Element | null = el.parentElement;
+  for (let depth = 0; n && depth < 8; depth++, n = n.parentElement) {
+    // Stop before a container that also holds another upload: its heading isn't this one's.
+    if (n.querySelectorAll('input[type=file]').length > 1) break;
+    for (const attr of ['data-automation-id', 'aria-label', 'id']) {
+      const v = normalize(n.getAttribute(attr));
+      if (v && v.length <= 80) out.push(v);
+    }
+    const heading = n.querySelector('h1, h2, h3, h4, h5, h6, legend, [role=heading]');
+    const t = heading ? normalize(textOf(heading)) : '';
+    if (t && t.length <= 80) {
+      out.push(t);
+      break;
+    }
+  }
+  return out;
+}
+
+/** Uploads that aren't a résumé, even when they're the only one on the page. */
+const OTHER_DOC_RE = /transcript|portfolio|writing sample|work sample|certificat|diploma|licen[cs]e|photo|headshot|reference|recommendation|additional|other (document|file)/;
+
 /** The label as shown (a trailing "*" is kept so `isRequired` can see it). */
 function visibleLabel(el: HTMLElement, fallback: string): string {
   const collapse = (t: string) => t.replace(/\s+/g, ' ').trim();
@@ -398,6 +427,7 @@ export function findQuestions(root: Root): Question[] {
   const out: Question[] = [];
   const handled = new Set<Element>();
   const controls = deepAll<HTMLElement>(root, 'input, textarea, select, [role=combobox], button[aria-haspopup=listbox]');
+  const fileInputs = controls.filter((c) => c instanceof c.ownerDocument.defaultView!.HTMLInputElement && (c as HTMLInputElement).type.toLowerCase() === 'file');
   for (const el of controls) {
     if (handled.has(el)) continue;
     handled.add(el);
@@ -406,6 +436,10 @@ export function findQuestions(root: Root): Question[] {
       const type = el.type.toLowerCase();
       if (type === 'file') {
         const ds = descriptors(el);
+        const docTypeKnown = () => ds.some((d) => RESUME_RE.test(d) || COVER_RE.test(d) || OTHER_DOC_RE.test(d));
+        if (!docTypeKnown()) for (const c of sectionContext(el)) if (!ds.includes(c)) ds.push(c);
+        // The only upload on an application that asks for a résumé somewhere is the résumé.
+        if (!docTypeKnown() && fileInputs.length === 1 && RESUME_RE.test(normalize(el.ownerDocument.body?.textContent))) ds.push('resume');
         out.push({ kind: 'file', label: cleanLabel(visibleLabel(el, ds[0] ?? 'File')), ds, el, members: [], required: isRequired(el, '') });
         continue;
       }
@@ -536,10 +570,31 @@ export function resolve(q: Question, req: FillRequest): Resolved {
   if (!key && el instanceof HTMLInputElement && el.type === 'tel') key = 'phone';
   key ??= PROFILE_RULES.find((r) => q.ds.some((d) => r.re.test(d) && !r.not?.test(d)))?.key;
   if (key) {
-    const v = req.data[key]?.trim();
+    let v = req.data[key]?.trim();
+    // With a separate country-code picker (Workday, many careers sites), "+1 613…" in the number box fails validation.
+    if (v && key === 'phone' && hasCountryCodeControl(q.el.ownerDocument)) v = nationalNumber(v);
     return v ? { value: v, key } : { missing: 'profile' };
   }
   return { missing: 'question' };
+}
+
+const COUNTRY_CODE_RE = /country (phone |calling |dial(ing)? )?code|phone (country )?code|dial(ing)? code|calling code/;
+
+function hasCountryCodeControl(doc: Document): boolean {
+  return deepAll<HTMLElement>(doc, 'input:not([type=hidden]), select, [role=combobox], button[aria-haspopup=listbox]').some(
+    (el) => descriptors(el).some((d) => COUNTRY_CODE_RE.test(d)) && isVisible(el),
+  );
+}
+
+/** "+1 (613) 555-0100" → "(613) 555-0100". Numbers whose country code can't be told apart are left as typed. */
+export function nationalNumber(phone: string): string {
+  const p = phone.trim();
+  const sep = /^(?:\+|00)\d{1,3}[\s.\-]+(?=\(?\d)/.exec(p);
+  if (sep) return p.slice(sep[0].length).trim();
+  // "+16135550100": only North American numbers (+1 and ten digits) are unambiguous without a separator.
+  const digits = p.replace(/\D/g, '');
+  if (/^\+1/.test(p) && digits.length === 11 && /^\+?1[\d\s().-]*$/.test(p)) return digits.slice(1);
+  return p;
 }
 
 /* ----------------------------------------------------------------------------
@@ -601,6 +656,15 @@ function setValue(el: TextControl, value: string) {
   el.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
+/** A key press as pickers expect it (`key`, `code` and the legacy `keyCode` some libraries still read). */
+function key(el: HTMLElement, name: 'ArrowDown' | 'Enter' | 'Escape') {
+  const view = el.ownerDocument.defaultView ?? window;
+  const keyCode = { ArrowDown: 40, Enter: 13, Escape: 27 }[name];
+  for (const type of ['keydown', 'keyup'] as const) {
+    el.dispatchEvent(new view.KeyboardEvent(type, { key: name, code: name, keyCode, which: keyCode, bubbles: true, cancelable: true, composed: true } as KeyboardEventInit));
+  }
+}
+
 function blur(el: HTMLElement) {
   el.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
   el.blur?.();
@@ -651,7 +715,26 @@ export function hasValue(q: Question): boolean {
     return !!t && !/^(select|choose|please|--)/.test(t);
   }
   if (q.kind === 'buttons') return (q.choices ?? []).some(isChosen);
+  // React-select and Workday prompts clear their search box once a choice is made and show the choice beside it.
+  if (q.kind === 'combobox') return !!(el as TextControl).value?.trim() || !!pickedText(el);
   return !!(el as TextControl).value?.trim();
+}
+
+/** Where pickers show what's already chosen: react-select's single / multi values, Workday's selected-item pills. */
+const PICKED_SELECTOR =
+  '[class*="single-value"], [class*="singleValue"], [class*="multi-value"], [class*="multiValue"], [data-automation-id=selectedItem], [data-automation-id=promptSelectionLabel]';
+
+/** The choice a search-style picker shows next to its input, or '' when nothing is chosen. */
+export function pickedText(el: HTMLElement): string {
+  let n: Element | null = el.parentElement;
+  for (let depth = 0; n && depth < 5; depth++, n = n.parentElement) {
+    // Don't wander into a neighbouring field's picker.
+    if (n.querySelectorAll('input:not([type=hidden]), textarea, select').length > 1) break;
+    const picked = n.querySelector(PICKED_SELECTOR);
+    const t = picked ? normalize(textOf(picked)) : '';
+    if (t && !/^(select|choose|please|--)/.test(t)) return t;
+  }
+  return '';
 }
 
 const isChosen = (b: HTMLElement) =>
@@ -764,17 +847,24 @@ export async function applyAnswer(q: Question, value: string): Promise<boolean> 
     case 'combobox': {
       // Type to filter, then pick the matching suggestion.
       const el = q.el as HTMLInputElement;
+      const match = () => bestOption(visibleOptions(doc, el), (o) => o.textContent ?? '', value);
       press(el);
       setValue(el, value);
-      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
-      const opt = await waitFor(() => bestOption(visibleOptions(doc, el), (o) => o.textContent ?? '', value), 2000);
+      key(el, 'ArrowDown');
+      let opt = await waitFor(match, 1500);
+      // Search prompts (Workday's "How did you hear about us", school and skill pickers) only search on Enter.
+      // Pressed only while no list is open: with a list open, Enter would pick whatever option is highlighted.
+      if (!opt && !visibleOptions(doc, el).length) {
+        key(el, 'Enter');
+        opt = await waitFor(match, 2500);
+      }
       if (opt) {
         press(opt);
         await settle(doc, 150, 1500);
         blur(el);
         return true;
       }
-      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      key(el, 'Escape');
       // Free-text location pickers accept typed text; other pickers need a real choice.
       if (q.ds.some((d) => /location|city/.test(d))) {
         blur(el);
@@ -792,7 +882,7 @@ export async function applyAnswer(q: Question, value: string): Promise<boolean> 
         await settle(doc, 150, 1500);
         return true;
       }
-      q.el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      key(q.el, 'Escape');
       doc.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
       return false;
     }
@@ -976,6 +1066,44 @@ function findOpenForm(doc: Document): HTMLElement | null {
   return hinted ?? visibleButtons(doc).find((b) => OPEN_FORM_RE.test(buttonText(b)) && !THIRD_PARTY_RE.test(buttonText(b))) ?? null;
 }
 
+/** Applicant-tracking systems whose forms careers sites embed in an iframe. */
+const ATS_HOST_RE =
+  /(^|\.)(greenhouse\.io|lever\.co|ashbyhq\.com|workable\.com|smartrecruiters\.com|myworkdayjobs\.com|myworkdaysite\.com|icims\.com|jobvite\.com|bamboohr\.com|recruitee\.com|breezy\.hr|applytojob\.com|teamtailor\.com|pinpointhq\.com|rippling\.com|dayforcehcm\.com|successfactors\.(com|eu)|taleo\.net|ultipro\.com|paylocity\.com)$/;
+
+const hostOf = (url: string | undefined, base?: string) => {
+  try {
+    return url ? new URL(url, base).hostname : '';
+  } catch {
+    return '';
+  }
+};
+
+function isTopFrame(doc: Document): boolean {
+  const view = doc.defaultView;
+  return !view || view === view.top;
+}
+
+/**
+ * Whether this frame may press "Apply" to open a form. Every frame of the tab
+ * runs the filler, so without this the careers page around an embedded
+ * Greenhouse / Lever form pressed its own "Apply" link and navigated away
+ * from the form being filled, and ad or chat frames pressed their own buttons.
+ */
+function mayOpenForm(doc: Document): boolean {
+  if (!isTopFrame(doc)) return ATS_HOST_RE.test(hostOf(doc.location?.href)) || !!formSiteFor(doc.location?.href);
+  return !Array.from(doc.querySelectorAll('iframe')).some((f) => ATS_HOST_RE.test(hostOf(f.getAttribute('src') ?? '', doc.baseURI)) && isVisible(f));
+}
+
+/**
+ * Follows an "Apply" link in this tab. Pressing it instead opened target=_blank
+ * links in a new tab (or got them popup-blocked), so this tab never changed and
+ * the extension waited, then pressed Apply again.
+ */
+function openInThisTab(doc: Document, href: string) {
+  // A moment later, so this frame's report reaches the extension before the page unloads.
+  setTimeout(() => doc.location.assign(href), 50);
+}
+
 function hasCaptcha(doc: Document): boolean {
   const frames = Array.from(doc.querySelectorAll('iframe')).some((f) => /recaptcha|hcaptcha|turnstile|challenges\.cloudflare|arkoselabs|funcaptcha/i.test(f.src) && isVisible(f));
   return frames || Array.from(doc.querySelectorAll('.g-recaptcha, .h-captcha, .cf-turnstile, [data-sitekey]')).some(isVisible);
@@ -1027,16 +1155,18 @@ export async function runApplication(doc: Document, req: FillRequest): Promise<F
   for (let step = 0; step < maxSteps; step++) {
     let questions = findQuestions(doc).filter((q) => q.kind !== 'file' || q.ds.some((d) => RESUME_RE.test(d) || COVER_RE.test(d)));
     // A job page whose form opens behind an "Apply" button (sometimes followed by a chooser: "Apply Manually").
-    for (let opened = 0; !questions.length && step === 0 && req.advance && opened < 2; opened++) {
+    for (let opened = 0; !questions.length && step === 0 && req.advance && opened < 2 && mayOpenForm(doc); opened++) {
       const open = findOpenForm(doc);
       if (!open) break;
-      const href = open instanceof HTMLAnchorElement ? open.href : '';
-      const leaves = href && !href.startsWith('javascript:') && new URL(href, doc.baseURI).href.split('#')[0] !== (doc.location?.href ?? '').split('#')[0];
-      press(open);
+      const anchor = open instanceof HTMLAnchorElement ? open : open.closest('a[href]');
+      const href = anchor instanceof HTMLAnchorElement ? anchor.href : '';
+      const leaves = !!href && /^https?:/i.test(href) && new URL(href, doc.baseURI).href.split('#')[0] !== (doc.location?.href ?? '').split('#')[0];
       if (leaves) {
+        openInThisTab(doc, href);
         report.stop = 'navigating';
         return report;
       }
+      press(open);
       await settle(doc, 300, 4000);
       if (needsLogin(doc)) break;
       questions = findQuestions(doc);
