@@ -18,10 +18,16 @@ This is intentional. Those sites' terms prohibit automated extraction by add-ons
 - **Work experience entries weren't filled**: the section needs an **Add** button labelled with the section ("Add Work Experience", or "Add" under a Work Experience heading) and job title / company fields. Unusual layouts may not be recognised; fill those entries by hand. Autofill never deletes entries the page already has.
 - **"the form didn't move to the next step"**: the page rejected something (the messages are shown). Fix it on the page and press **Autofill** again.
 - **CAPTCHA or sign-in**: do it yourself on the page, then press **Autofill** again. Job Copilot never solves CAPTCHAs or signs in for you.
-- **A dropdown wasn't chosen**: the saved answer didn't match any option closely. Use the option's wording, e.g. "Decline to self-identify".
+- **A dropdown wasn't chosen**: the saved answer didn't match any option closely enough, or two options matched equally well. Autofill doesn't guess: the field is listed under **Couldn't fill** (or as a question) with the page's own options. Pick one there, or save your answer using the option's wording, e.g. "Decline to self-identify".
+- **"Couldn't fill" list**: fields Autofill tried but the page didn't accept, or that the page changed back afterwards. They're outlined in red on the page and are never counted as filled. Use **Fill in** to try a different value, **Show on page** to scroll to it, or fix it on the page yourself.
+- **"Part of this page wasn't filled"**: the application (or part of it) sits in a frame from another site, which Chrome only lets Job Copilot into with your permission. Press **Allow access to …** and then Autofill again. Job Copilot never works around this.
+- **"Needs access to …"**: the application moved to another site (often after **Apply**). Press **Allow access**, or click the Job Copilot icon on that page and press **Continue autofill**.
+- **"Worked out from your profile, check these"**: values like province, country or a phone country code were derived from your saved location and number rather than typed by you. Check them on the page.
+- **"Last step is yours" doesn't appear**: a required question is still empty, a field is flagged as invalid, or the page shows an error. The panel lists what's left. Autofill never says an application is ready while any of that remains.
+- **"The page didn't respond" right after updating the extension**: reload the application page. A page opened before the update may still hold the old filler; Job Copilot replaces it, but a page in the middle of loading can't answer.
 - **Wrong first / last name split**: correct it once under **Answers for application questions → What Autofill types into forms**. It's remembered.
-- **Form inside a frame isn't filled**: frames from another site need that site enabled in Settings → Job sites.
-- **Résumé not attached**: the upload field may already have a file, accept a different type, or be a custom widget without a file input. Attach it on the page yourself.
+- **Form inside a frame isn't filled**: frames from another site need access to that site. Use **Allow access to …** in the Autofill report, or enable the site in Settings → Job sites.
+- **Résumé not attached**: the report says why. The field already had a file (kept unless overwriting is allowed), the field's accepted types don't include your file's type, the page rejected the file (its message is shown), there was no upload field, or attaching is turned off. Choose another file under **Résumé to attach**, or attach it on the page yourself. Uploading a résumé to Job Copilot doesn't attach it anywhere by itself.
 - **Some sites ignore the clicks**: a few sites only accept "trusted" input from a real mouse or keyboard. On those, finish the remaining steps yourself.
 
 ### Résumé title / company came out swapped or empty

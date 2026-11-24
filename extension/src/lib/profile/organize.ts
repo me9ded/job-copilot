@@ -8,12 +8,13 @@ import type { Experience, Project, ResumeContent } from '../types';
  * invented: it only groups and indexes what the user's résumé already says.
  */
 
-export type SkillGroup = 'languages' | 'frameworks' | 'tools' | 'other';
+export type SkillGroup = 'languages' | 'frameworks' | 'tools' | 'soft' | 'other';
 
 export const SKILL_GROUP_LABEL: Record<SkillGroup, string> = {
   languages: 'Programming languages',
   frameworks: 'Frameworks & libraries',
   tools: 'Tools & platforms',
+  soft: 'Soft skills',
   other: 'Other skills',
 };
 
@@ -30,6 +31,7 @@ const GROUP_OF: Partial<Record<SkillCategory, SkillGroup>> = {
   tool: 'tools',
   testing: 'tools',
   security: 'tools',
+  soft: 'soft',
 };
 
 export function skillGroup(skill: string): SkillGroup {
@@ -44,7 +46,7 @@ export function groupSkills(skills: string[]): Array<{ group: SkillGroup; label:
     const g = skillGroup(s);
     by.set(g, [...(by.get(g) ?? []), s]);
   }
-  return (['languages', 'frameworks', 'tools', 'other'] as const).filter((g) => by.has(g)).map((g) => ({ group: g, label: SKILL_GROUP_LABEL[g], skills: by.get(g)! }));
+  return (['languages', 'frameworks', 'tools', 'soft', 'other'] as const).filter((g) => by.has(g)).map((g) => ({ group: g, label: SKILL_GROUP_LABEL[g], skills: by.get(g)! }));
 }
 
 const METRIC_RE = /\d|%|\b\d+x\b|×/;

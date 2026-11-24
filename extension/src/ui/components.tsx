@@ -133,10 +133,11 @@ export function Badge({ tone = 'neutral', children, title }: { tone?: Tone; chil
   );
 }
 
-export function Alert({ tone = 'neutral', title, children, action }: { tone?: Tone; title?: string; children?: ReactNode; action?: ReactNode }) {
+/** `role` overrides the live region; use "note" inside something that is already announced. */
+export function Alert({ tone = 'neutral', title, children, action, role }: { tone?: Tone; title?: string; children?: ReactNode; action?: ReactNode; role?: 'alert' | 'status' | 'note' }) {
   const icon = tone === 'bad' || tone === 'warn' ? <Icon.Alert size={16} /> : <Icon.Info size={16} />;
   return (
-    <div role={tone === 'bad' ? 'alert' : 'status'} className={cx('flex gap-2 rounded-md border px-3 py-2 text-[12.5px]', TONES[tone])}>
+    <div role={role ?? (tone === 'bad' ? 'alert' : 'status')} className={cx('flex gap-2 rounded-md border px-3 py-2 text-[12.5px]', TONES[tone])}>
       <span className="mt-0.5 shrink-0">{icon}</span>
       <div className="min-w-0 flex-1 text-fg">
         {title && <p className="font-semibold">{title}</p>}

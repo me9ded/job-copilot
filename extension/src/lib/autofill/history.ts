@@ -1,23 +1,15 @@
-import {
-  applyAnswer,
-  claimed,
-  findQuestions,
-  hasValue,
-  highlight,
-  highlightTarget,
-  normalize,
-  ours,
-  press,
-  settle,
-  textOf,
-  visibleButtons,
-  waitFor,
-  type EducationEntry,
-  type FillReport,
-  type FillRequest,
-  type HistoryEntry,
-  type Question,
-} from './fill';
+import { applyAnswer } from './engine/controls';
+import { scopedQuestions } from './engine/detect';
+import { findQuestions, type Question } from './engine/discover';
+import { press } from './engine/interact';
+import { degreeValues } from './engine/match';
+import { claimed, highlightTarget, mark, ours } from './engine/mark';
+import { settle, waitForDom } from './engine/observe';
+import { visibleButtons } from './engine/steps';
+import { normalize, textOf } from './engine/text';
+import { hasValue } from './engine/verify';
+import type { FailedField } from './engine/report';
+import type { EducationEntry, FillReport, FillRequest, HistoryEntry } from './fill';
 
 /**
  * Repeatable "Work experience" / "Education" sections (Workday, Greenhouse,
@@ -106,28 +98,18 @@ function dateValues(value: string, q: Question): string[] {
   }
 }
 
-/** Degree strings forms tend to offer for a degree on the résumé ("BSc" → "Bachelor's Degree"). */
-function degreeValues(degree: string): string[] {
-  const d = degree.toLowerCase();
-  const out = [degree];
-  if (/bachelor|b\.?\s?sc|\bb\.?a\b|b\.?eng|\bbs\b|undergrad/.test(d)) out.push("Bachelor's Degree", 'Bachelor');
-  else if (/master|m\.?\s?sc|\bmba\b|m\.?eng|\bms\b|\bma\b/.test(d)) out.push("Master's Degree", 'Master');
-  else if (/ph\.?\s?d|doctor/.test(d)) out.push('Doctorate', 'PhD', 'Doctor');
-  else if (/advanced diploma|diploma|college|technolog|technician/.test(d)) out.push('Diploma', 'College Diploma', 'Associate');
-  else if (/associate/.test(d)) out.push("Associate's Degree", 'Associate');
-  return [...new Set(out)];
-}
-
 /** Anchor fields that start an entry: a job title, or a school. */
 const anchorRole = (kind: Kind): Role => (kind === 'experience' ? 'title' : 'school');
 
 /** One container per entry, in page order. A container holds one anchor and at least two other recognised fields. */
 export function findEntries(doc: Document, kind: Kind): Element[] {
-  const anchors = findQuestions(doc).filter((q) => roleOf(q, kind) === anchorRole(kind));
+  const anchors = scopedQuestions(doc).filter((q) => roleOf(q, kind) === anchorRole(kind));
   const containers: Element[] = [];
   for (const a of anchors) {
     let best: Element | null = null;
     for (let n: Element | null = a.el.parentElement, depth = 0; n && depth < 10; n = n.parentElement, depth++) {
+      // Never the whole page: an entry is a part of the form.
+      if (n.tagName === 'BODY' || n.tagName === 'HTML') break;
       if (anchors.some((o) => o !== a && n!.contains(o.el))) break;
       best = n;
     }
@@ -167,8 +149,9 @@ async function tryValues(q: Question, values: string[]): Promise<boolean> {
   return false;
 }
 
-async function fillEntry(container: Element, kind: Kind, item: HistoryEntry | EducationEntry, req: FillRequest): Promise<boolean> {
-  const qs = findQuestions(container);
+async function fillEntry(container: Element, kind: Kind, item: HistoryEntry | EducationEntry, req: FillRequest, failed: FailedField[]): Promise<boolean> {
+  // Only the entry's own fields are taken; anything else in the container is left to the main pass.
+  const qs = findQuestions(container).filter((q) => roleOf(q, kind));
   qs.forEach((q) => {
     claimed.add(q.el);
     q.members.forEach((m) => claimed.add(m));
@@ -193,10 +176,14 @@ async function fillEntry(container: Element, kind: Kind, item: HistoryEntry | Ed
     if (!values.length) continue;
     if (await tryValues(q, values)) {
       ours.add(q.el);
-      highlight(highlightTarget(q));
+      mark(highlightTarget(q), 'filled');
       any = true;
       // Ticking "I currently work here" usually removes the end-date fields.
       if (role === 'current') await settle(container.ownerDocument, 120, 1200);
+    } else {
+      // Tried and not kept (or no matching option): said so, never dropped.
+      mark(highlightTarget(q), 'failed');
+      failed.push({ id: q.id, label: q.label, reason: `“${values[0]}” wasn’t accepted.`, kind: q.kind, required: q.required });
     }
   }
   return any;
@@ -212,14 +199,17 @@ async function fillSection(doc: Document, kind: Kind, items: Array<HistoryEntry 
       const before = entries.length;
       press(add);
       await settle(doc, 200, 3000);
-      entries = (await waitFor(() => {
+      entries = (await waitForDom(doc, () => {
         const e = findEntries(doc, kind);
         return e.length > before ? e : null;
       }, 2500)) ?? entries;
       if (entries.length <= i) break;
     }
     const item = items[i]!;
-    if (await fillEntry(entries[i]!, kind, item, req)) {
+    const failed: FailedField[] = [];
+    const ok = await fillEntry(entries[i]!, kind, item, req, failed);
+    for (const f of failed) if (!report.failed!.some((x) => x.id === f.id)) report.failed!.push(f);
+    if (ok) {
       const label =
         kind === 'experience'
           ? `Work experience ${i + 1}: ${[(item as HistoryEntry).title, (item as HistoryEntry).company].filter(Boolean).join(' at ')}`

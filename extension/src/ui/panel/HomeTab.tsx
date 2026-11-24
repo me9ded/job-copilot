@@ -20,6 +20,7 @@ const STOP_SHORT: Record<string, string> = {
   captcha: 'paused at CAPTCHA',
   login: 'needed sign-in',
   navigating: 'page was loading',
+  needs_access: 'needed page access',
   max_steps: 'stopped (many steps)',
   no_form: 'no form found',
 };

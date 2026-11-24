@@ -1,13 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { profileCompletion } from '../../lib/matching/service';
-import { FILE_TYPES, readResumeFile } from '../../lib/resume/files';
-import { parseResumeText, type ParsedResume } from '../../lib/resume/parse';
-import { addOriginalResume, putResumeFile, saveProfile } from '../../lib/storage/repo';
-import { Profile, Seniority, type Education, type Experience, type Project, type StoredFile } from '../../lib/types';
-import { bytesToBase64, errorMessage, nowIso, uid } from '../../lib/util';
-import { Alert, Button, Card, Checkbox, Dialog, Field, IconButton, Input, ListInput, Loading, Meter, TextArea, useToast } from '../components';
+import { textResumeDraft, type ResumeDraft } from '../../lib/resume/importer';
+import { saveProfile } from '../../lib/storage/repo';
+import { Profile, Seniority, type Education, type Experience, type Project } from '../../lib/types';
+import { errorMessage, uid } from '../../lib/util';
+import { Button, Card, Checkbox, Dialog, Field, IconButton, Input, ListInput, Loading, Meter, TextArea, useToast } from '../components';
 import { useProfile } from '../hooks';
 import { Icon } from '../icons';
+import { ImportReview } from '../resume/ImportReview';
+import { ResumeDrop } from '../resume/ResumeDrop';
 import { SENIORITY_LABEL } from '../../lib/matching/analysis';
 
 const ARRANGEMENTS = ['remote', 'hybrid', 'onsite'] as const;
@@ -17,12 +18,11 @@ export function ProfileEditor({ simple = false, onDone }: { simple?: boolean; on
   const stored = useProfile();
   const [draft, setDraft] = useState<Profile | null>(null);
   const [dirty, setDirty] = useState(false);
-  const [parsed, setParsed] = useState<(ParsedResume & { rawText: string; fileName?: string; file?: StoredFile }) | null>(null);
+  // A parsed upload or paste waiting for review; nothing is saved until it's confirmed.
+  const [review, setReview] = useState<ResumeDraft | null>(null);
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteText, setPasteText] = useState('');
-  const [uploadError, setUploadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const fileRef = useRef<HTMLInputElement>(null);
   const toast = useToast();
 
   useEffect(() => {
@@ -30,54 +30,24 @@ export function ProfileEditor({ simple = false, onDone }: { simple?: boolean; on
   }, [stored, dirty]);
 
   if (!draft) return <Loading />;
+  if (review && stored)
+    return (
+      <ImportReview
+        draft={review}
+        profile={stored}
+        onCancel={() => setReview(null)}
+        onSaved={({ profile }) => {
+          setReview(null);
+          setDraft(profile);
+          setDirty(false);
+        }}
+      />
+    );
   const update = (fn: (p: Profile) => Profile) => {
     setDraft((p) => (p ? fn(p) : p));
     setDirty(true);
   };
   const completion = profileCompletion(draft);
-
-  const onFile = async (file: File | undefined) => {
-    if (!file) return;
-    setUploadError(null);
-    setBusy(true);
-    try {
-      const { text, kind, data } = await readResumeFile(file);
-      // PDF / DOCX originals are kept (locally) so application autofill can attach your own file.
-      const stored = kind === 'text' ? undefined : { name: file.name, type: FILE_TYPES[kind], size: data.length, base64: bytesToBase64(data), savedAt: nowIso() };
-      setParsed({ ...parseResumeText(text), rawText: text, fileName: file.name, file: stored });
-    } catch (e) {
-      setUploadError(errorMessage(e));
-    } finally {
-      setBusy(false);
-      if (fileRef.current) fileRef.current.value = '';
-    }
-  };
-
-  const applyParsed = async (mode: 'replace' | 'merge') => {
-    if (!parsed) return;
-    const c = parsed.content;
-    const next: Profile =
-      mode === 'replace'
-        ? { ...draft, ...c, preferences: draft.preferences }
-        : {
-            ...draft,
-            basics: Object.fromEntries(Object.entries(draft.basics).map(([k, v]) => [k, Array.isArray(v) ? (v.length ? v : (c.basics as Record<string, unknown>)[k]) : v || (c.basics as Record<string, unknown>)[k]])) as Profile['basics'],
-            skills: Array.from(new Set([...draft.skills, ...c.skills])),
-            experience: [...draft.experience, ...c.experience],
-            education: [...draft.education, ...c.education],
-            projects: [...draft.projects, ...c.projects],
-            certifications: Array.from(new Set([...draft.certifications, ...c.certifications])),
-          };
-    const now = nowIso();
-    // The uploaded résumé is preserved verbatim as a read-only original version.
-    const original = await addOriginalResume({ id: uid('res'), name: `Original — ${parsed.fileName ?? 'pasted text'}`, kind: 'original', content: c, rawText: parsed.rawText, sourceFileName: parsed.fileName, createdAt: now, updatedAt: now });
-    if (parsed.file) await putResumeFile(original.id, parsed.file);
-    const saved = await saveProfile(next);
-    setDraft(saved);
-    setDirty(false);
-    setParsed(null);
-    toast('Profile updated from résumé. Review the details below.', 'good');
-  };
 
   const save = async () => {
     setBusy(true);
@@ -99,20 +69,18 @@ export function ProfileEditor({ simple = false, onDone }: { simple?: boolean; on
       {!simple && (<>
       <Card
         title="Résumé import"
-        subtitle="PDF, DOCX or plain text. Parsed locally in your browser — nothing is uploaded."
+        subtitle="PDF, DOCX or plain text. Read in your browser; nothing is uploaded."
         actions={
-          <>
-            <input ref={fileRef} type="file" accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain" className="sr-only" id="resume-file" onChange={(e) => void onFile(e.target.files?.[0])} />
-            <Button size="sm" variant="primary" icon={<Icon.Upload size={14} />} busy={busy} onClick={() => fileRef.current?.click()}>
-              Upload
-            </Button>
-            <Button size="sm" icon={<Icon.Clipboard size={14} />} onClick={() => setPasteOpen(true)}>
-              Paste
-            </Button>
-          </>
+          <Button size="sm" icon={<Icon.Clipboard size={14} />} onClick={() => setPasteOpen(true)}>
+            Paste text
+          </Button>
         }
       >
-        {uploadError ? <Alert tone="bad">{uploadError}</Alert> : <p className="text-[12.5px] text-muted">You’ll review what was extracted before anything is saved. The original is kept unchanged as a read-only version.</p>}
+        {dirty ? (
+          <p className="text-[12.5px] text-warn">Save or discard your edits below first; an import is compared with your saved profile.</p>
+        ) : (
+          <ResumeDrop onDraft={setReview} hint="You’ll check everything that was found (and anything that differs from your profile) before it’s saved. The original is kept unchanged." />
+        )}
       </Card>
 
       <Card title="Profile completeness">
@@ -279,7 +247,7 @@ export function ProfileEditor({ simple = false, onDone }: { simple?: boolean; on
             variant="primary"
             disabled={pasteText.trim().length < 50}
             onClick={() => {
-              setParsed({ ...parseResumeText(pasteText), rawText: pasteText });
+              setReview(textResumeDraft(pasteText));
               setPasteOpen(false);
             }}
           >
@@ -290,49 +258,6 @@ export function ProfileEditor({ simple = false, onDone }: { simple?: boolean; on
         <TextArea aria-label="Résumé text" rows={14} value={pasteText} onChange={(e) => setPasteText(e.target.value)} />
       </Dialog>
 
-      <Dialog
-        open={!!parsed}
-        onClose={() => setParsed(null)}
-        wide
-        title="Review extracted résumé"
-        footer={
-          <>
-            <Button variant="ghost" onClick={() => setParsed(null)}>
-              Cancel
-            </Button>
-            <Button onClick={() => void applyParsed('merge')}>Add to my profile</Button>
-            <Button variant="primary" onClick={() => void applyParsed('replace')}>
-              Replace profile
-            </Button>
-          </>
-        }
-      >
-        {parsed && (
-          <div className="flex flex-col gap-2 text-[13px]">
-            {parsed.warnings.map((w) => (
-              <Alert key={w} tone="warn">
-                {w}
-              </Alert>
-            ))}
-            <p>
-              <b>{parsed.content.basics.name || 'No name'}</b> · {parsed.content.basics.email || 'no email'} · {parsed.content.basics.headline}
-            </p>
-            <p className="text-muted">
-              {parsed.content.experience.length} roles · {parsed.content.education.length} education · {parsed.content.projects.length} projects · {parsed.content.skills.length} skills
-            </p>
-            {parsed.content.experience.map((e) => (
-              <div key={e.id} className="rounded-md border border-line p-2">
-                <p className="font-medium">
-                  {e.title || '(no title)'} — {e.company || '(no company)'} <span className="font-normal text-muted">{[e.start, e.end].filter(Boolean).join(' → ')}</span>
-                </p>
-                <ul className="list-disc pl-4 text-[12.5px]">{e.bullets.slice(0, 4).map((b, i) => <li key={i}>{b}</li>)}</ul>
-              </div>
-            ))}
-            {parsed.content.skills.length > 0 && <p><b>Skills:</b> {parsed.content.skills.join(', ')}</p>}
-            <p className="text-[12px] text-muted">Everything can be edited after import. “Replace” keeps your job preferences.</p>
-          </div>
-        )}
-      </Dialog>
     </div>
   );
 }

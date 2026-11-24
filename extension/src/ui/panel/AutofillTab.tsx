@@ -3,19 +3,45 @@ import { browser } from 'wxt/browser';
 import { AiError } from '../../lib/ai/client';
 import { aiAnswerQuestion } from '../../lib/ai/features';
 import { composeAnswer, hasSlot, QUESTION_TYPE_LABEL, type Draft } from '../../lib/autofill/answers';
-import type { FillReport, Unanswered } from '../../lib/autofill/fill';
+import type { FillReport, QuestionCategory, Unanswered } from '../../lib/autofill/fill';
 import { profileIsEmpty } from '../../lib/matching/service';
 import { ensureApplication, setApplicationStatus, setJobSaved, upsertJob } from '../../lib/storage/repo';
 import { SESSION_KEYS } from '../../lib/storage/schema';
 import type { ExtractedJob, JobRecord, Profile } from '../../lib/types';
 import { nowIso } from '../../lib/util';
-import { FillResult, useAutofill, type AutofillRequest } from '../autofill';
+import { FailedList, FillResult, useAutofill, useResumeChoices, type AutofillRequest } from '../autofill';
 import { Alert, Badge, Button, Card, Checkbox, Dialog, Input, Select, TextArea, cx, useToast } from '../components';
 import { useAction, useJobs, useProfile, useSessionValue, useSettings } from '../hooks';
 import { Icon } from '../icons';
 import { SectionTitle, useJobContext, type PanelTab } from './shared';
 
 const REQUEST_TTL_MS = 30_000;
+
+const CATEGORY_LABEL: Record<QuestionCategory, string> = {
+  contact: 'Contact details',
+  eligibility: 'Work eligibility',
+  sponsorship: 'Sponsorship',
+  salary: 'Pay',
+  availability: 'Availability',
+  relocation: 'Location & relocation',
+  employment: 'Employment type',
+  demographics: 'Voluntary self-identification',
+  experience: 'Experience & skills',
+  documents: 'Documents',
+  consent: 'Agreements',
+  custom: 'Other questions',
+};
+const CATEGORY_ORDER = Object.keys(CATEGORY_LABEL) as QuestionCategory[];
+
+/** Required first, then grouped by topic, in a fixed topic order. */
+function groupByCategory(qs: Unanswered[]): Array<[QuestionCategory, Unanswered[]]> {
+  const by = new Map<QuestionCategory, Unanswered[]>();
+  for (const q of [...qs].sort((a, b) => Number(b.required) - Number(a.required))) {
+    const c = q.category ?? 'custom';
+    by.set(c, [...(by.get(c) ?? []), q]);
+  }
+  return CATEGORY_ORDER.filter((c) => by.has(c)).map((c) => [c, by.get(c)!]);
+}
 const CHOICE_KINDS = new Set(['select', 'radio', 'buttons', 'combobox', 'listbox', 'checkbox', 'checkboxes']);
 
 type Step = 0 | 1 | 2 | 3;
@@ -61,6 +87,10 @@ export function AutofillTab({ tabId, go }: { tabId: number | null | undefined; g
   const request = useSessionValue<AutofillRequest>(SESSION_KEYS.autofillRequest);
   const report = auto.report;
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const choicesForResume = useResumeChoices();
+  // The résumé to attach on this run; starts from the saved choice.
+  const [attach, setAttach] = useState<string | null>(null);
+  useEffect(() => setAttach(null), [tabId]);
 
   // The popup, toolbar shortcut or right-click menu asked to autofill this tab: do it once, as soon as data is loaded.
   useEffect(() => {
@@ -74,8 +104,10 @@ export function AutofillTab({ tabId, go }: { tabId: number | null | undefined; g
   const step = stepOf(report, auto.fill.busy);
   const empty = profile ? profileIsEmpty(profile) : false;
   const aiOn = !!settings && settings.ai.features.applicationAnswers !== 'none';
-  const written = report?.unanswered.filter((u) => !CHOICE_KINDS.has(u.kind ?? 'text')) ?? [];
-  const choices = report?.unanswered.filter((u) => CHOICE_KINDS.has(u.kind ?? 'text')) ?? [];
+  const toSign = report?.unanswered.filter((u) => u.reason === 'signature') ?? [];
+  const open = report?.unanswered.filter((u) => u.reason !== 'signature') ?? [];
+  const written = open.filter((u) => !CHOICE_KINDS.has(u.kind ?? 'text'));
+  const choices = open.filter((u) => CHOICE_KINDS.has(u.kind ?? 'text'));
 
   return (
     <div className="flex flex-col gap-3">
@@ -89,16 +121,46 @@ export function AutofillTab({ tabId, go }: { tabId: number | null | undefined; g
         </Alert>
       )}
 
-      <Button variant="primary" className="h-11! w-full text-[15px]!" icon={<Icon.Form size={18} />} busy={auto.fill.busy} disabled={!tabId || empty} onClick={() => void auto.fill.run()}>
+      <Button variant="primary" className="h-11! w-full text-[15px]!" icon={<Icon.Form size={18} />} busy={auto.fill.busy} disabled={!tabId || empty} onClick={() => void auto.fill.run(undefined, attach ?? undefined)}>
         {report && report.stop !== 'no_form' && report.stop !== 'submit_ready' ? 'Continue autofill' : 'Autofill this page'}
       </Button>
+      {settings && choicesForResume && !empty && (
+        <label className="flex items-center gap-2 text-[12px] text-muted">
+          <span className="shrink-0">Résumé to attach</span>
+          <Select aria-label="Résumé to attach on this application" value={attach ?? settings.autofill.attach} onChange={(e) => setAttach(e.target.value)} className="h-7 text-[12px]">
+            {choicesForResume.map((c) => (
+              <option key={c.value} value={c.value}>
+                {c.label}
+              </option>
+            ))}
+          </Select>
+        </label>
+      )}
       {!report && !auto.fill.error && !auto.fill.busy && (
         <p className="text-center text-[12px] text-muted">Open the job’s application form, then press Autofill. It fills each step, drafts answers for you to review, and stops before the final submit.</p>
       )}
       {auto.fill.error && (
         <Alert tone="bad">{auto.fill.error}</Alert>
       )}
-      {report && <FillResult report={report} attach={auto.attach} />}
+      {report && <FillResult report={report} attach={attach ?? auto.attach} />}
+
+      {report && <FailedList report={report} busy={auto.answer.busy} onAnswer={(q, v, r) => auto.answer.run(q, v, r)} onReveal={auto.reveal} onSkip={auto.skip} />}
+
+      {toSign.length > 0 && (
+        <Alert tone="warn" title="Sign these yourself">
+          <p>Job Copilot never signs or initials for you.</p>
+          <ul className="mt-1 flex flex-col gap-1">
+            {toSign.map((u) => (
+              <li key={u.id ?? u.label} className="flex items-center justify-between gap-2">
+                <span>{u.label}</span>
+                <Button size="sm" variant="ghost" icon={<Icon.Search size={13} />} onClick={() => auto.reveal(u)}>
+                  Show on page
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </Alert>
+      )}
 
       {report && written.length > 0 && profile && (
         <section aria-label="Written answers" className="flex flex-col gap-2">
@@ -108,7 +170,7 @@ export function AutofillTab({ tabId, go }: { tabId: number | null | undefined; g
           {[...written]
             .sort((a, b) => Number(b.required) - Number(a.required))
             .map((u) => (
-              <WrittenQuestion key={u.label} q={u} profile={profile} job={target.job} aiOn={aiOn} busy={auto.answer.busy} onUse={(v, remember) => auto.answer.run(u.label, v, remember)} onSkip={() => auto.skip(u.label)} />
+              <WrittenQuestion key={u.id ?? u.label} q={u} profile={profile} job={target.job} aiOn={aiOn} busy={auto.answer.busy} onUse={(v, remember) => auto.answer.run(u, v, remember)} onSkip={() => auto.skip(u)} />
             ))}
         </section>
       )}
@@ -118,11 +180,14 @@ export function AutofillTab({ tabId, go }: { tabId: number | null | undefined; g
           <SectionTitle>Questions to choose ({choices.length})</SectionTitle>
           <p className="text-[12px] text-muted">Autofill doesn’t guess these. Pick your answer; tick Remember to reuse it on other applications.</p>
           {auto.answer.error && !written.length && <Alert tone="bad">{auto.answer.error}</Alert>}
-          {[...choices]
-            .sort((a, b) => Number(b.required) - Number(a.required))
-            .map((u) => (
-              <ChoiceQuestion key={u.label} q={u} busy={auto.answer.busy} onUse={(v, remember) => auto.answer.run(u.label, v, remember)} />
-            ))}
+          {groupByCategory(choices).map(([category, qs]) => (
+            <div key={category} className="flex flex-col gap-2">
+              {category !== 'custom' && <p className="text-[11.5px] font-medium text-muted">{CATEGORY_LABEL[category]}</p>}
+              {qs.map((u) => (
+                <ChoiceQuestion key={u.id ?? u.label} q={u} busy={auto.answer.busy} onUse={(v, remember) => auto.answer.run(u, v, remember)} />
+              ))}
+            </div>
+          ))}
         </section>
       )}
 
@@ -137,7 +202,7 @@ export function AutofillTab({ tabId, go }: { tabId: number | null | undefined; g
         </Card>
       )}
 
-      {report && (report.stop === 'submit_ready' || report.stop === 'done') && (
+      {report && report.stop === 'submit_ready' && (
         <Card title="Last step is yours">
           <p className="text-[12.5px]">
             Review every field on the page{report.unanswered.length ? ' (optional questions above are still empty)' : ''}, then press {report.submitLabel ? `“${report.submitLabel}”` : 'Submit'} yourself. Job Copilot never submits for you.
@@ -246,11 +311,12 @@ function WrittenQuestion({
   const rows = q.kind === 'text' ? 2 : Math.min(12, Math.max(3, Math.ceil(text.length / 45) + 1));
 
   return (
-    <article className="flex flex-col gap-2 rounded-lg border border-line bg-surface p-3" aria-label={q.label}>
+    <article className="flex flex-col gap-2 rounded-lg border border-line bg-surface p-3" aria-label={q.section ? `${q.label} (${q.section})` : q.label}>
       <div className="flex items-start justify-between gap-2">
         <p className="text-[13px] font-medium">
           {q.label}
           {q.required && <span className="text-bad"> *</span>}
+          {q.section && <span className="block text-[11.5px] font-normal text-muted">In “{q.section}”</span>}
         </p>
         <Badge tone="accent">{QUESTION_TYPE_LABEL[draft.type]}</Badge>
       </div>
@@ -313,10 +379,11 @@ function ChoiceQuestion({ q, busy, onUse }: { q: Unanswered; busy: boolean; onUs
   const [value, setValue] = useState('');
   const [remember, setRemember] = useState(true);
   return (
-    <article className="flex flex-col gap-1.5 rounded-lg border border-line bg-surface p-3" aria-label={q.label}>
+    <article className="flex flex-col gap-1.5 rounded-lg border border-line bg-surface p-3" aria-label={q.section ? `${q.label} (${q.section})` : q.label}>
       <p className="text-[13px] font-medium">
         {q.label}
         {q.required && <span className="text-bad"> *</span>}
+        {q.section && <span className="block text-[11.5px] font-normal text-muted">In “{q.section}”</span>}
       </p>
       <div className="flex gap-2">
         {options.length ? (
